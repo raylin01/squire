@@ -1,0 +1,19 @@
+{
+  "name": "squire-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Squire - Personal AI Assistant Monorepo",
+  "workspaces": [
+    "squire",
+    "squire-bot"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "test": "npm run test --workspaces",
+    "dev:squire": "npm run dev --workspace=@squire/core",
+    "dev:bot": "npm run dev --workspace=@squire/bot"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

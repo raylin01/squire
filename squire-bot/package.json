@@ -1,0 +1,27 @@
+{
+  "name": "@squire/bot",
+  "version": "0.1.0",
+  "description": "Minimal Discord bot for Squire - passes messages to runner-agent",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "squire-bot": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "node --watch dist/index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.18.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

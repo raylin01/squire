@@ -1,0 +1,52 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.js
+*.js.map
+*.d.ts
+!src/**/*.js
+
+# Keep TypeScript source
+!*.ts
+
+# Lock files (keep package-lock.json for npm users)
+# bun.lock
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Test coverage
+coverage/
+
+# Squire data (user-specific)
+.squire/
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Database files (user data)
+*.db
+*.db-journal
+*.db-wal
+*.sqlite
+*.sqlite3
