@@ -7,9 +7,14 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { fileURLToPath } from 'url';
 import type { Skill, SkillFrontmatter } from '../types.js';
 import { parseSkillFrontmatter, extractSkillName } from './frontmatter.js';
 import { checkEligibility } from './eligibility.js';
+
+// ES module equivalent of __dirname
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 export interface SkillLoaderOptions {
   skillsDir?: string;

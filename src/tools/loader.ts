@@ -8,8 +8,13 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { fileURLToPath } from 'url';
 import type { SquireTool, ToolFrontmatter, ToolHandlerContext } from '../types.js';
 import { parseToolFrontmatter, extractToolName, validateToolFrontmatter } from './frontmatter.js';
+
+// ES module equivalent of __dirname
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 export interface ToolLoaderOptions {
   globalDir?: string;     // ~/.squire/tools
