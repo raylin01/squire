@@ -6,6 +6,7 @@
 
 import { EventEmitter } from 'events';
 import path from 'path';
+import fs from 'fs';
 import { v4 as uuid } from 'uuid';
 import type {
   SquireConfig,
@@ -211,8 +212,17 @@ export class Squire extends EventEmitter {
 
       // Set up SDK event handlers
       this.sdkClient.on('output', (output) => {
-        // Internal output - don't show to user by default
         this.lastHeartbeat = new Date();
+        // Emit output event for Discord routing
+        // Note: output.outputType can be 'stdout' or 'thinking'
+        if (this.activeWorkspaceId) {
+          this.emitEvent('output', {
+            workspaceId: this.activeWorkspaceId,
+            content: output.content,
+            outputType: output.outputType || 'stdout',
+            isComplete: output.isComplete || false,
+          });
+        }
       });
 
       this.sdkClient.on('tool_use', async (event) => {
@@ -227,6 +237,12 @@ export class Squire extends EventEmitter {
 
       this.sdkClient.on('complete', () => {
         this.updateActivity('ready');
+        // Emit complete event with workspaceId
+        if (this.activeWorkspaceId) {
+          this.emitEvent('complete', {
+            workspaceId: this.activeWorkspaceId,
+          });
+        }
       });
 
       this.sdkClient.on('error', (error) => {
@@ -334,6 +350,7 @@ export class Squire extends EventEmitter {
 
     this.workspaces.set(workspace.workspaceId, workspace);
     this.emitEvent('workspace_created', { workspace });
+    await this.saveWorkspaces();
 
     console.log(`[Squire] Created workspace: ${workspace.name} (${workspace.workspaceId})`);
     return workspace;
@@ -708,6 +725,7 @@ export class Squire extends EventEmitter {
       toolName: event.toolName,
       toolInput: event.toolInput,
       reason: permissionReason,
+      workspaceId: this.activeWorkspaceId,
     });
   }
 
@@ -951,13 +969,36 @@ export class Squire extends EventEmitter {
   // ==========================================================================
 
   private async loadWorkspaces(): Promise<void> {
-    // TODO: Load from storage
-    console.log('[Squire] Loading workspaces...');
+    const workspacesFile = path.join(this.config.dataDir, 'workspaces.json');
+
+    try {
+      if (fs.existsSync(workspacesFile)) {
+        const data = fs.readFileSync(workspacesFile, 'utf-8');
+        const workspacesData = JSON.parse(data) as Workspace[];
+
+        for (const workspace of workspacesData) {
+          this.workspaces.set(workspace.workspaceId, workspace);
+        }
+
+        console.log(`[Squire] Loaded ${workspacesData.length} workspaces from storage`);
+      } else {
+        console.log('[Squire] No existing workspaces file, starting fresh');
+      }
+    } catch (error) {
+      console.error('[Squire] Failed to load workspaces:', error);
+    }
   }
 
   private async saveWorkspaces(): Promise<void> {
-    // TODO: Save to storage
-    console.log('[Squire] Saving workspaces...');
+    const workspacesFile = path.join(this.config.dataDir, 'workspaces.json');
+
+    try {
+      const workspacesData = Array.from(this.workspaces.values());
+      fs.writeFileSync(workspacesFile, JSON.stringify(workspacesData, null, 2));
+      console.log(`[Squire] Saved ${workspacesData.length} workspaces to storage`);
+    } catch (error) {
+      console.error('[Squire] Failed to save workspaces:', error);
+    }
   }
 
   private calculateNextRun(schedule: TaskSchedule): string {

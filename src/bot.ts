@@ -42,27 +42,54 @@ import path from 'path';
  */
 class WorkspaceManager {
   private squire: Squire;
-  private workspaces = new Map<string, string>(); // channelId -> workspaceId
+  private channelToWorkspace = new Map<string, string>(); // channelId -> workspaceId
+  private workspaceToChannel = new Map<string, string>(); // workspaceId -> channelId
 
   constructor(squire: Squire) {
     this.squire = squire;
+    // Restore mappings from saved workspaces
+    this.restoreFromSavedWorkspaces();
+  }
+
+  /**
+   * Restore channel mappings from saved workspaces
+   */
+  private restoreFromSavedWorkspaces(): void {
+    const workspaces = this.squire.getWorkspaces();
+    for (const workspace of workspaces) {
+      if (workspace.sourceId) {
+        this.channelToWorkspace.set(workspace.sourceId, workspace.workspaceId);
+        this.workspaceToChannel.set(workspace.workspaceId, workspace.sourceId);
+        console.log(`[Workspace] Restored mapping: ${workspace.sourceId} <-> ${workspace.workspaceId}`);
+      }
+    }
   }
 
   /**
    * Get or create a workspace for a Discord channel
    */
   async getOrCreateWorkspace(channelId: string, channelName: string, source: 'discord_dm' | 'discord_channel' | 'discord_forum'): Promise<string> {
-    let workspaceId = this.workspaces.get(channelId);
+    let workspaceId = this.channelToWorkspace.get(channelId);
 
     if (!workspaceId) {
-      const workspace = await this.squire.createWorkspace({
-        name: channelName,
-        source,
-        sourceId: channelId,
-      });
-      workspaceId = workspace.workspaceId;
-      this.workspaces.set(channelId, workspaceId);
-      console.log(`[Workspace] Created ${workspaceId} for ${source}:${channelName}`);
+      // Check if Squire already has a workspace for this source
+      const existing = this.squire.getWorkspaceBySource(source, channelId);
+      if (existing) {
+        workspaceId = existing.workspaceId;
+        this.channelToWorkspace.set(channelId, workspaceId);
+        this.workspaceToChannel.set(workspaceId, channelId);
+        console.log(`[Workspace] Reconnected to ${workspaceId} for ${source}:${channelName}`);
+      } else {
+        const workspace = await this.squire.createWorkspace({
+          name: channelName,
+          source,
+          sourceId: channelId,
+        });
+        workspaceId = workspace.workspaceId;
+        this.channelToWorkspace.set(channelId, workspaceId);
+        this.workspaceToChannel.set(workspaceId, channelId);
+        console.log(`[Workspace] Created ${workspaceId} for ${source}:${channelName}`);
+      }
     }
 
     return workspaceId;
@@ -72,7 +99,14 @@ class WorkspaceManager {
    * Get workspace ID for a channel
    */
   getWorkspace(channelId: string): string | undefined {
-    return this.workspaces.get(channelId);
+    return this.channelToWorkspace.get(channelId);
+  }
+
+  /**
+   * Get channel ID for a workspace
+   */
+  getChannelId(workspaceId: string): string | undefined {
+    return this.workspaceToChannel.get(workspaceId);
   }
 }
 
@@ -82,9 +116,36 @@ class WorkspaceManager {
 class DiscordCommunicator {
   private client: Client;
   private channelMap = new Map<string, TextChannel | DMChannel | ThreadChannel>(); // workspaceId -> channel
+  private workspaceManager: WorkspaceManager | null = null;
 
   constructor(client: Client) {
     this.client = client;
+  }
+
+  /**
+   * Set the workspace manager for channel lookups
+   */
+  setWorkspaceManager(workspaceManager: WorkspaceManager): void {
+    this.workspaceManager = workspaceManager;
+  }
+
+  /**
+   * Restore channel mappings from saved workspaces
+   */
+  async restoreChannels(workspaces: Array<{ workspaceId: string; sourceId?: string }>): Promise<void> {
+    for (const workspace of workspaces) {
+      if (workspace.sourceId) {
+        try {
+          const channel = await this.client.channels.fetch(workspace.sourceId);
+          if (channel && channel.isTextBased() && 'send' in channel) {
+            this.channelMap.set(workspace.workspaceId, channel as TextChannel | DMChannel | ThreadChannel);
+            console.log(`[Communicator] Restored channel for workspace ${workspace.workspaceId}`);
+          }
+        } catch (error) {
+          console.warn(`[Communicator] Could not restore channel ${workspace.sourceId}:`, error);
+        }
+      }
+    }
   }
 
   /**
@@ -288,6 +349,59 @@ async function main(): Promise<void> {
   squire.on('status', (event: any) => {
     const data = event.data;
     console.log(`[Squire] Status: ${data.activity}`);
+
+    // Update Discord presence based on activity
+    const activity = data.activity as string;
+    let presenceText = 'for tasks';
+    let discordStatus: 'online' | 'idle' | 'dnd' = 'online';
+
+    if (activity === 'thinking' || activity === 'working') {
+      presenceText = 'thinking...';
+      discordStatus = 'online';
+    } else if (activity === 'awaiting approval') {
+      presenceText = 'awaiting approval';
+      discordStatus = 'idle';
+    } else if (activity === 'ready') {
+      presenceText = 'for tasks';
+      discordStatus = 'online';
+    } else if (activity === 'error') {
+      presenceText = 'error';
+      discordStatus = 'dnd';
+    }
+
+    client.user?.setPresence({
+      activities: [{ name: presenceText, type: ActivityType.Watching }],
+      status: discordStatus,
+    });
+  });
+
+  // Handle SDK output events - send to Discord channel
+  squire.on('output', async (event: any) => {
+    const data = event.data;
+    const workspaceId = data.workspaceId as string | undefined;
+    if (!workspaceId) return;
+
+    const content = data.content as string;
+    const outputType = data.outputType as string;
+    const isComplete = data.isComplete as boolean;
+
+    if (!content || content.trim() === '') return;
+
+    // Only send stdout output to Discord (thinking is internal)
+    // Only send when complete to avoid spamming partial output
+    if (outputType === 'stdout' && isComplete) {
+      await communicator.sendText(workspaceId, content);
+    } else if (outputType === 'thinking') {
+      // Log thinking for debugging
+      console.log(`[Squire] Thinking: ${content.slice(0, 100)}...`);
+    }
+  });
+
+  // Handle complete events - session finished
+  squire.on('complete', async (event: any) => {
+    const data = event.data;
+    const workspaceId = data.workspaceId as string | undefined;
+    console.log(`[Squire] Session complete for workspace: ${workspaceId}`);
   });
 
   // Handle approval requests
@@ -349,6 +463,11 @@ async function main(): Promise<void> {
     // Start Squire
     await squire.start();
     console.log('[SquireBot] Squire core started');
+
+    // Restore channel mappings from saved workspaces
+    const savedWorkspaces = squire.getWorkspaces();
+    await communicator.restoreChannels(savedWorkspaces);
+    console.log(`[SquireBot] Restored ${savedWorkspaces.length} workspace channel mappings`);
 
     // Load plugins
     if (!useSafeMode) {
