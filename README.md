@@ -27,12 +27,51 @@ squire/
 ### 1. Install Dependencies
 
 ```bash
+# Install root dependencies
 bun install
+
+# Build the core package first
+cd squire && bun run build && cd ..
+
+# Install bot dependencies (links @squire/core workspace)
+cd squire-bot && bun install && cd ..
 ```
 
-### 2. Install QMD (Optional - for semantic search)
+### 2. Build
 
-QMD is an optional MCP server that provides semantic search over your memory files. Without it, Squire still provides intelligent context (core memory + recent activity logs).
+```bash
+bun run build
+```
+
+### 3. Initialize SquireBot
+
+Create a Discord bot at [Discord Developer Portal](https://discord.com/developers/applications), then:
+
+```bash
+cd squire-bot
+bun run start init \
+  --token=YOUR_DISCORD_BOT_TOKEN \
+  --app-id=YOUR_DISCORD_APP_ID \
+  --provider=claude
+```
+
+This creates `~/.squirebot/config.json` with your settings.
+
+### 4. Start the Bot
+
+```bash
+cd squire-bot
+bun run start
+```
+
+That's it! You can now:
+- DM the bot directly
+- Mention it in guild channels
+- Use slash commands (`/status`, `/memory`, `/help`)
+
+### 5. (Optional) Add QMD for Semantic Search
+
+QMD is an optional MCP server that provides semantic search over your memory files.
 
 **Install QMD:**
 ```bash
@@ -57,37 +96,6 @@ qmd embed
 - QMD runs as a separate MCP server
 - The AI uses QMD's MCP tools (`qmd_search`, `qmd_vector_search`) directly when available
 - Without QMD, Squire provides local keyword search + intelligent context injection
-
-### 3. Build
-
-```bash
-bun run build
-```
-
-### 4. Initialize SquireBot
-
-Create a Discord bot at [Discord Developer Portal](https://discord.com/developers/applications), then:
-
-```bash
-cd squire-bot
-bun run start init \
-  --token=YOUR_DISCORD_BOT_TOKEN \
-  --app-id=YOUR_DISCORD_APP_ID \
-  --provider=claude
-```
-
-This creates `~/.squirebot/config.json` with your settings.
-
-### 5. Start the Bot
-
-```bash
-bun run start
-```
-
-That's it! You can now:
-- DM the bot directly
-- Mention it in guild channels
-- Use slash commands (`/status`, `/memory`, `/help`)
 
 ## Configuration
 
