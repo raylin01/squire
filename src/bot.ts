@@ -198,15 +198,19 @@ class DiscordCommunicator {
   async sendText(workspaceId: string, content: string): Promise<void> {
     const channel = this.channelMap.get(workspaceId);
     if (!channel) {
-      console.warn(`[Communicator] No channel for workspace ${workspaceId}`);
+      console.warn(`[Communicator] No channel for workspace ${workspaceId}, registered channels: ${Array.from(this.channelMap.keys()).join(', ')}`);
       return;
     }
+
+    console.log(`[Communicator] Sending ${content.length} chars to channel for workspace ${workspaceId}`);
 
     // Split long messages
     const chunks = this.splitMessage(content, 2000);
     for (const chunk of chunks) {
       await channel.send(chunk);
     }
+
+    console.log(`[Communicator] Sent ${chunks.length} message(s)`);
   }
 
   /**
@@ -429,21 +433,32 @@ async function main(): Promise<void> {
   squire.on('output', async (event: any) => {
     const data = event.data;
     const workspaceId = data.workspaceId as string | undefined;
-    if (!workspaceId) return;
-
     const content = data.content as string;
     const outputType = data.outputType as string;
     const isComplete = data.isComplete as boolean;
 
-    if (!content || content.trim() === '') return;
+    console.log(`[Squire] Output event: type=${outputType}, complete=${isComplete}, workspace=${workspaceId}, content=${content?.slice(0, 50)}...`);
+
+    if (!workspaceId) {
+      console.warn('[Squire] Output event missing workspaceId');
+      return;
+    }
+
+    if (!content || content.trim() === '') {
+      console.log('[Squire] Output event has empty content, skipping');
+      return;
+    }
 
     // Only send stdout output to Discord (thinking is internal)
     // Only send when complete to avoid spamming partial output
     if (outputType === 'stdout' && isComplete) {
+      console.log(`[Squire] Sending output to Discord: ${content.length} chars`);
       await communicator.sendText(workspaceId, content);
     } else if (outputType === 'thinking') {
       // Log thinking for debugging
       console.log(`[Squire] Thinking: ${content.slice(0, 100)}...`);
+    } else {
+      console.log(`[Squire] Not sending: outputType=${outputType}, isComplete=${isComplete}`);
     }
   });
 
