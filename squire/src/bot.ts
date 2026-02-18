@@ -18,23 +18,23 @@ import {
   DMChannel,
   ThreadChannel,
 } from 'discord.js';
-import { Squire, createSquire } from '@squire/core';
-import type { WorkspaceSource } from '@squire/core';
-import { loadConfig, saveConfig, createDefaultConfig, getConfigPath, getSquireBotDir } from './config.js';
-import type { SquireBotConfig } from './config.js';
-import { setupDmHandler } from './handlers/dm.js';
-import { handleCommand, setupCommandHandler } from './handlers/commands.js';
+import { Squire, createSquire } from './index.js';
+import type { WorkspaceSource } from './index.js';
+import { loadConfig, saveConfig, createDefaultConfig, getConfigPath, getSquireBotDir } from './bot/config.js';
+import type { SquireBotConfig } from './bot/config.js';
+import { setupDmHandler } from './bot/handlers/dm.js';
+import { handleCommand, setupCommandHandler } from './bot/handlers/commands.js';
 import {
   handleAskUserQuestion,
   setupQuestionHandlers,
   registerQuestionChannel,
-} from './handlers/questions.js';
+} from './bot/handlers/questions.js';
 import {
   registerSlashCommands,
   setupSlashCommandHandler,
-} from './handlers/slash-commands.js';
-import { PluginLoader, createPluginLoader } from './plugins/index.js';
-import type { PluginInfo } from './plugins/index.js';
+} from './bot/handlers/slash-commands.js';
+import { PluginLoader, createPluginLoader } from './bot/plugins/index.js';
+import type { PluginInfo } from './bot/plugins/index.js';
 import path from 'path';
 
 /**

@@ -8,7 +8,7 @@
 import fs from 'fs';
 import path from 'path';
 import type { Client, TextChannel, DMChannel, ThreadChannel } from 'discord.js';
-import type { Squire } from '@squire/core';
+import type { Squire } from '../../index.js';
 import type { SquirePlugin, PluginContext, PluginState, PluginInfo, WorkspaceSource } from './types.js';
 
 export interface PluginLoaderOptions {

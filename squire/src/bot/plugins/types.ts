@@ -9,7 +9,7 @@
  */
 
 import type { Client, TextChannel, DMChannel, ThreadChannel } from 'discord.js';
-import type { Squire } from '@squire/core';
+import type { Squire } from '../../index.js';
 
 /**
  * Plugin manifest - defines what the plugin does

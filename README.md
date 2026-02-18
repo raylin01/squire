@@ -1,25 +1,28 @@
 # Squire
 
-Personal AI assistant with memory, skills, and scheduling capabilities.
+Personal AI assistant with memory, skills, and scheduling capabilities. Includes a Discord bot.
 
 ## Project Structure
 
 ```
 squire/
-├── squire/              # Core package (@squire/core)
-│   └── src/
-│       ├── squire.ts    # Main Squire class
-│       ├── types.ts     # Type definitions
-│       ├── sdk/         # AI SDK clients (Claude, Gemini, Codex)
-│       ├── memory/      # Memory system (markdown files)
-│       ├── skills/      # Skills system
-│       ├── scheduler/   # Task scheduling
-│       └── tickets/     # Ticket tracking
-└── squire-bot/          # Discord bot
-    └── src/
-        ├── index.ts         # Entry point
-        ├── handlers/        # DM, forum, questions, slash commands
-        └── plugins/         # Plugin system
+├── src/
+│   ├── index.ts         # Main exports
+│   ├── squire.ts        # Main Squire class
+│   ├── bot.ts           # Discord bot entry point
+│   ├── types.ts         # Type definitions
+│   ├── sdk/             # AI SDK clients (Claude, Gemini, Codex)
+│   ├── memory/          # Memory system (markdown files)
+│   ├── skills/          # Skills system
+│   ├── scheduler/       # Task scheduling
+│   ├── tickets/         # Ticket tracking
+│   ├── tools/           # Tool registry
+│   └── bot/             # Discord bot
+│       ├── config.ts
+│       ├── handlers/    # DM, forum, questions, slash commands
+│       └── plugins/     # Plugin system
+├── package.json
+└── tsconfig.json
 ```
 
 ## Quick Start
@@ -27,14 +30,7 @@ squire/
 ### 1. Install Dependencies
 
 ```bash
-# Install root dependencies
 bun install
-
-# Build the core package first
-cd squire && bun run build && cd ..
-
-# Install bot dependencies (links @squire/core workspace)
-cd squire-bot && bun install && cd ..
 ```
 
 ### 2. Build
@@ -43,13 +39,12 @@ cd squire-bot && bun install && cd ..
 bun run build
 ```
 
-### 3. Initialize SquireBot
+### 3. Initialize
 
 Create a Discord bot at [Discord Developer Portal](https://discord.com/developers/applications), then:
 
 ```bash
-cd squire-bot
-bun run start init \
+bun run bot init \
   --token=YOUR_DISCORD_BOT_TOKEN \
   --app-id=YOUR_DISCORD_APP_ID \
   --provider=claude
@@ -60,8 +55,7 @@ This creates `~/.squirebot/config.json` with your settings.
 ### 4. Start the Bot
 
 ```bash
-cd squire-bot
-bun run start
+bun run bot
 ```
 
 That's it! You can now:
@@ -147,7 +141,7 @@ When the AI needs input, it shows an interactive button UI:
 - Expiration handling with resend request
 
 ### Plugin System
-Plugins in `~/.squirebot/plugins/` or `squire-bot/plugins/`:
+Plugins in `~/.squirebot/plugins/`:
 - Hot reload support
 - Safe mode (`--safe` flag disables all plugins)
 - Direct Discord.js access
@@ -197,14 +191,17 @@ bun x tsc --noEmit
 
 # Build
 bun run build
+
+# Run tests
+bun run test
 ```
 
 ## Architecture
 
-SquireBot is a standalone Discord bot that uses Squire core directly:
+Squire is a single package with Discord bot included:
 
 ```
-Discord ←→ squire-bot ←→ Squire Core ←→ AI SDK (Claude/Gemini/Codex)
+Discord ←→ Bot Module ←→ Squire Core ←→ AI SDK (Claude/Gemini/Codex)
                               ↓
                         Memory (markdown files)
                               ↓
@@ -229,7 +226,7 @@ Optional: QMD MCP Server ←-- AI calls directly for semantic search
 - [x] Discord bot (DM, guild, forum)
 - [x] Slash commands
 - [x] AskUserQuestion UI
-- [x] Memory system (QMD)
+- [x] Memory system
 - [x] Skills system
 - [x] Scheduler
 - [x] Plugin system

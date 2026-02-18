@@ -1,12 +1,13 @@
 {
-  "name": "@squire/core",
+  "name": "squire",
   "version": "0.1.0",
-  "description": "Personal AI assistant with memory, skills, and scheduling",
+  "description": "Personal AI assistant with memory, skills, and scheduling - Discord bot included",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "squire": "./dist/cli.js"
+    "squire": "./dist/cli.js",
+    "squire-bot": "./dist/bot.js"
   },
   "exports": {
     ".": {
@@ -19,7 +20,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "bot": "node dist/bot.js",
+    "start": "node dist/bot.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
@@ -27,13 +30,16 @@
     "@raylin01/codex-client": "^0.1.0",
     "@raylin01/gemini-client": "^0.1.0",
     "better-sqlite3": "^11.0.0",
+    "discord.js": "^14.18.0",
     "uuid": "^10.0.0",
+    "ws": "^8.18.0",
     "yaml": "^2.6.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.11",
     "@types/node": "^22.0.0",
     "@types/uuid": "^10.0.0",
+    "@types/ws": "^8.5.0",
     "typescript": "^5.0.0",
     "vitest": "^2.0.0"
   },

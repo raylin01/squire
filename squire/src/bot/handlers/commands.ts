@@ -9,15 +9,15 @@ import {
   EmbedBuilder,
 } from 'discord.js';
 import type { Client } from 'discord.js';
-import type { Squire } from '@squire/core';
+import type { Squire } from '../../index.js';
 import {
   loadConfig,
   saveConfig,
   getSquireDir,
   PERSONALITY_TEMPLATES,
   getPersonalityTemplateList,
-} from '@squire/core';
-import type { PersonalityTemplateName } from '@squire/core';
+} from '../../index.js';
+import type { PersonalityTemplateName } from '../../index.js';
 import type { SquireBotConfig } from '../config.js';
 
 const COMMAND_PREFIX = '!';
@@ -180,7 +180,7 @@ const COMMANDS: Record<string, { handler: CommandHandler; help: string }> = {
     help: 'List available tools',
     handler: async (ctx) => {
       // Get tool registry
-      const { toolRegistry } = await import('@squire/core');
+      const { toolRegistry } = await import('../../index.js');
       const tools = toolRegistry.getAll();
 
       if (tools.length === 0) {

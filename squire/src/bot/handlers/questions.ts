@@ -23,7 +23,7 @@ import {
   Interaction,
   ButtonInteraction,
 } from 'discord.js';
-import type { Squire } from '@squire/core';
+import type { Squire } from '../../index.js';
 
 /**
  * Pending question state

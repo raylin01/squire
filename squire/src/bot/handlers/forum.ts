@@ -11,7 +11,7 @@ import {
   Message,
 } from 'discord.js';
 import type { Client } from 'discord.js';
-import type { Squire } from '@squire/core';
+import type { Squire } from '../../index.js';
 import type { SquireBotConfig } from '../config.js';
 
 interface WorkspaceManager {

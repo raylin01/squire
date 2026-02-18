@@ -11,7 +11,7 @@ import {
   ChatInputCommandInteraction,
   Client,
 } from 'discord.js';
-import type { Squire } from '@squire/core';
+import type { Squire } from '../../index.js';
 
 // Command definitions
 const commands = [
