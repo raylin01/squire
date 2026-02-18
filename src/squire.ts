@@ -234,6 +234,9 @@ export class Squire extends EventEmitter {
         this.updateActivity('error');
       });
 
+      // Start the SDK client (spawns the underlying process)
+      await this.sdkClient.start();
+
       console.log(`[Squire] SDK initialized: ${this.config.sdk.provider}`);
     } catch (error) {
       console.error('[Squire] Failed to initialize SDK:', error);
