@@ -4,7 +4,7 @@
  * Tools for scheduling tasks and reminders.
  */
 
-import { defineTool } from './index.js';
+import { defineTool } from './registry.js';
 import type { Scheduler } from '../scheduler/scheduler.js';
 
 let scheduler: Scheduler | null = null;

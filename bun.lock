@@ -542,5 +542,7 @@
     "@discordjs/rest/@discordjs/collection": ["@discordjs/collection@2.1.1", "", {}, "sha512-LiSusze9Tc7qF03sLCujF5iZp7K+vRNEDBZ86FT9aQAv3vxMLihUvKvpsCWiQ2DJq1tVckopKm1rxomgNUc9hg=="],
 
     "@discordjs/ws/@discordjs/collection": ["@discordjs/collection@2.1.1", "", {}, "sha512-LiSusze9Tc7qF03sLCujF5iZp7K+vRNEDBZ86FT9aQAv3vxMLihUvKvpsCWiQ2DJq1tVckopKm1rxomgNUc9hg=="],
+
+    "@squire/bot/@squire/core": ["@squire/core@file:squire", { "dependencies": { "@modelcontextprotocol/sdk": "^1.0.0", "@raylin01/claude-client": "^0.1.0", "@raylin01/codex-client": "^0.1.0", "@raylin01/gemini-client": "^0.1.0", "better-sqlite3": "^11.0.0", "uuid": "^10.0.0", "yaml": "^2.6.0" }, "devDependencies": { "@types/better-sqlite3": "^7.6.11", "@types/node": "^22.0.0", "@types/uuid": "^10.0.0", "typescript": "^5.0.0", "vitest": "^2.0.0" }, "bin": { "squire": "./dist/cli.js" } }],
   }
 }

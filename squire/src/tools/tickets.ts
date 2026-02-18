@@ -4,7 +4,7 @@
  * Tools for managing tickets/tracking tasks and issues.
  */
 
-import { defineTool } from './index.js';
+import { defineTool } from './registry.js';
 import type { TicketManager } from '../tickets/manager.js';
 
 let ticketManager: TicketManager | null = null;

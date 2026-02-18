@@ -5,7 +5,7 @@
  * These enable the AI to respond to requests like "your name is Stark" or "be more helpful".
  */
 
-import { defineTool } from './index.js';
+import { defineTool } from './registry.js';
 import { loadConfig, saveConfig } from '../config.js';
 import { PERSONALITY_TEMPLATES } from '../personality/templates.js';
 import type { PersonalityTemplateName } from '../personality/templates.js';

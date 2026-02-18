@@ -4,7 +4,7 @@
  * Tools that allow Squire to manage itself - restart, change config, switch SDK, etc.
  */
 
-import { defineTool } from './index.js';
+import { defineTool } from './registry.js';
 import { sendEmbed } from './communicate.js';
 
 // Self-management state - set by Squire instance

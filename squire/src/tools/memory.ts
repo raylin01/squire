@@ -5,7 +5,7 @@
  * Helps AI understand when and how to use different memory types.
  */
 
-import { defineTool } from './index.js';
+import { defineTool } from './registry.js';
 import type { HybridMemoryManager } from '../memory/hybrid-manager.js';
 
 let memoryManager: HybridMemoryManager | null = null;

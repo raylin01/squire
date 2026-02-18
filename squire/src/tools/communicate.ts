@@ -5,7 +5,7 @@
  * All output to users should go through this tool.
  */
 
-import { defineTool } from './index.js';
+import { defineTool } from './registry.js';
 
 export type MessageType = 'text' | 'embed' | 'file' | 'image';
 
