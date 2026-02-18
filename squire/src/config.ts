@@ -7,11 +7,27 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import type { SquireConfig, MemoryConfig, SkillsConfig, PermissionConfig } from './types.js';
+import type { SquireConfig, MemoryConfig, SkillsConfig, ToolsConfig, PermissionConfig, PersonalityConfig, SDKConfig } from './types.js';
 
 const SQUIRE_DIR = path.join(os.homedir(), '.squire');
 const CONFIG_FILE = path.join(SQUIRE_DIR, 'config.json');
 const DATA_DIR = path.join(SQUIRE_DIR, 'data');
+const TOOLS_GLOBAL_DIR = path.join(SQUIRE_DIR, 'tools');
+
+/**
+ * Default personality configuration
+ */
+const DEFAULT_PERSONALITY: PersonalityConfig['default'] = {
+  name: 'Helpful Assistant',
+  description: 'A friendly, balanced assistant that provides helpful responses with moderate detail.',
+  traits: {
+    tone: 'friendly',
+    verbosity: 'balanced',
+    technicality: 'moderate',
+    enthusiasm: 'enthusiastic',
+    humor: 'subtle',
+  },
+};
 
 /**
  * Default configuration values
@@ -21,7 +37,9 @@ const DEFAULT_CONFIG: Omit<SquireConfig, 'squireId'> = {
   dataDir: DATA_DIR,
   memoryDbPath: path.join(DATA_DIR, 'memory.db'),
   skillsDir: path.join(DATA_DIR, 'skills'),
-  model: 'claude-sonnet-4-20250514',
+  sdk: {
+    provider: 'claude',
+  },
   daemonMode: false,
   pollInterval: 60000,
   memory: {
@@ -35,8 +53,18 @@ const DEFAULT_CONFIG: Omit<SquireConfig, 'squireId'> = {
     additional: [],
     autoInstall: true,
   },
+  tools: {
+    globalDir: TOOLS_GLOBAL_DIR,
+    projectDir: '.squire/tools',
+    autoInstall: true,
+    searchEnabled: true,
+  },
+  personality: {
+    default: DEFAULT_PERSONALITY,
+    workspaceOverrides: {},
+  },
   permissions: {
-    mode: 'confirm',
+    mode: 'autoSafe',
     allowedTools: [],
     blockedTools: [],
   },
@@ -90,6 +118,10 @@ export function ensureSquireDir(): void {
   if (!fs.existsSync(skillsDir)) {
     fs.mkdirSync(skillsDir, { recursive: true });
   }
+
+  if (!fs.existsSync(TOOLS_GLOBAL_DIR)) {
+    fs.mkdirSync(TOOLS_GLOBAL_DIR, { recursive: true });
+  }
 }
 
 /**
@@ -132,12 +164,15 @@ export function resolveConfig(partial: Partial<SquireConfig> & { squireId: strin
     dataDir,
     memoryDbPath: partial.memoryDbPath || path.join(dataDir, 'memory.db'),
     skillsDir: partial.skillsDir || path.join(dataDir, 'skills'),
-    model: partial.model || DEFAULT_CONFIG.model,
+    sdk: deepMergeObjects(DEFAULT_CONFIG.sdk, partial.sdk),
+    model: partial.model,
     fallbackModel: partial.fallbackModel,
     daemonMode: partial.daemonMode ?? DEFAULT_CONFIG.daemonMode,
     pollInterval: partial.pollInterval ?? DEFAULT_CONFIG.pollInterval,
     memory: deepMergeObjects(DEFAULT_CONFIG.memory, partial.memory),
     skills: deepMergeObjects(DEFAULT_CONFIG.skills, partial.skills),
+    tools: deepMergeObjects(DEFAULT_CONFIG.tools, partial.tools),
+    personality: deepMergeObjects(DEFAULT_CONFIG.personality, partial.personality),
     permissions: deepMergeObjects(DEFAULT_CONFIG.permissions, partial.permissions),
   };
 
@@ -214,6 +249,20 @@ export function getConfigPath(): string {
 }
 
 /**
+ * Get the path to the global tools directory
+ */
+export function getToolsDir(): string {
+  return TOOLS_GLOBAL_DIR;
+}
+
+/**
+ * Get the default personality
+ */
+export function getDefaultPersonality(): PersonalityConfig['default'] {
+  return DEFAULT_PERSONALITY;
+}
+
+/**
  * Validate configuration
  */
 export function validateConfig(config: SquireConfig): { valid: boolean; errors: string[] } {
@@ -227,16 +276,20 @@ export function validateConfig(config: SquireConfig): { valid: boolean; errors: 
     errors.push('name is required');
   }
 
-  if (!config.model) {
-    errors.push('model is required');
+  if (!config.sdk?.provider) {
+    errors.push('sdk.provider is required');
+  }
+
+  if (!['claude', 'gemini', 'codex'].includes(config.sdk?.provider)) {
+    errors.push('sdk.provider must be claude, gemini, or codex');
   }
 
   if (config.pollInterval < 1000) {
     errors.push('pollInterval must be at least 1000ms');
   }
 
-  if (!['trust', 'confirm', 'ask'].includes(config.permissions.mode)) {
-    errors.push('permissions.mode must be trust, confirm, or ask');
+  if (!['strict', 'autoSafe', 'permissive'].includes(config.permissions.mode)) {
+    errors.push('permissions.mode must be strict, autoSafe, or permissive');
   }
 
   return {
@@ -255,8 +308,19 @@ export function mergeEnvConfig(config: SquireConfig): SquireConfig {
     envConfig.name = process.env.SQUIRE_NAME;
   }
 
-  if (process.env.SQUIRE_MODEL) {
-    envConfig.model = process.env.SQUIRE_MODEL;
+  if (process.env.SQUIRE_SDK_PROVIDER) {
+    envConfig.sdk = {
+      ...(config.sdk || {}),
+      provider: process.env.SQUIRE_SDK_PROVIDER as SDKConfig['provider'],
+    };
+  }
+
+  if (process.env.SQUIRE_SDK_MODEL) {
+    envConfig.sdk = {
+      ...(config.sdk || {}),
+      provider: config.sdk?.provider || 'claude',
+      model: process.env.SQUIRE_SDK_MODEL,
+    };
   }
 
   if (process.env.SQUIRE_DAEMON) {
@@ -277,5 +341,5 @@ export function mergeEnvConfig(config: SquireConfig): SquireConfig {
     };
   }
 
-  return Object.keys(envConfig).length > 0 ? { ...config, ...envConfig } : config;
+  return Object.keys(envConfig).length > 0 ? deepMergeObjects(config, envConfig) : config;
 }

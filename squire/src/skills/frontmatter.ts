@@ -62,6 +62,7 @@ export function validateFrontmatter(frontmatter: SkillFrontmatter): string[] {
 
 export function extractSkillName(filePath: string): string {
   const parts = filePath.split('/');
-  const dirName = parts[parts.length - 2] || 'unknown';
+  // Get the last part (the skill directory name itself)
+  const dirName = parts[parts.length - 1] || 'unknown';
   return dirName;
 }

@@ -1,14 +1,22 @@
 /**
- * Memory Manager
+ * Memory Manager (Legacy)
  *
- * Thin wrapper around QMD MCP server for persistent memory with
- * local embeddings and hybrid search.
+ * @deprecated Use HybridMemoryManager instead for better memory organization.
+ *
+ * This is a thin wrapper around QMD MCP server for searching indexed documents.
+ * NOTE: QMD is a search engine for existing markdown files, not a key-value store.
+ * - Use search() to find documents
+ * - add() writes to a local markdown file that can be indexed by QMD
+ *
+ * For full memory capabilities (core memory, daily logs, semantic search),
+ * use HybridMemoryManager from './hybrid-manager.js'.
  */
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { MemoryEntry, MemorySearchResult, MemoryConfig, MemorySource } from '../types.js';
 import path from 'path';
+import fs from 'fs';
 
 export interface MemoryAddOptions {
   source?: MemorySource;
@@ -26,11 +34,18 @@ export class MemoryManager {
   private config: MemoryConfig;
   private mcpClient: Client | null = null;
   private dataDir: string;
+  private memoriesFile: string;
   private initialized: boolean = false;
 
   constructor(config: MemoryConfig, dataDir: string) {
     this.config = config;
     this.dataDir = dataDir;
+    this.memoriesFile = path.join(dataDir, 'memories.md');
+
+    // Ensure data directory exists
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true });
+    }
   }
 
   async initialize(): Promise<void> {
@@ -54,124 +69,194 @@ export class MemoryManager {
     console.log('[Memory] Connected to QMD');
   }
 
+  /**
+   * Add a memory by appending to local markdown file
+   * This file can be indexed by QMD via 'qmd collection add'
+   */
   async add(content: string, options?: MemoryAddOptions): Promise<MemoryEntry> {
-    this.ensureInitialized();
+    const id = `mem-${Date.now()}`;
+    const timestamp = new Date().toISOString();
+    const source = options?.source || 'user';
 
-    const metadata = {
-      ...options?.metadata,
-      source: options?.source || 'user',
-      workspaceId: options?.workspaceId,
-    };
-
-    const result = await this.mcpClient!.callTool({
-      name: 'qmd_remember',
-      arguments: {
-        content,
-        metadata
-      }
-    });
-
-    const id = this.extractTextContent(result.content);
-
-    return {
-      id: id || `mem-${Date.now()}`,
+    const entry: MemoryEntry = {
+      id,
       content,
-      source: options?.source || 'user',
+      source,
       workspaceId: options?.workspaceId,
-      metadata: metadata as Record<string, unknown>,
-      createdAt: new Date().toISOString(),
+      metadata: options?.metadata,
+      createdAt: timestamp,
     };
+
+    // Append to markdown file for QMD indexing
+    const lines = [
+      `## ${id}`,
+      `*${timestamp} | ${source}${options?.workspaceId ? ` | ${options.workspaceId}` : ''}*`,
+      '',
+      content,
+      '',
+      '---',
+      '',
+    ];
+
+    fs.appendFileSync(this.memoriesFile, lines.join('\n'), 'utf-8');
+
+    return entry;
   }
 
+  /**
+   * Search using QMD's vector_search tool
+   */
   async search(query: string, options?: MemorySearchOptions): Promise<MemorySearchResult[]> {
     this.ensureInitialized();
 
-    const filter: Record<string, unknown> = {};
-    if (options?.workspaceId) {
-      filter.workspaceId = options.workspaceId;
-    }
-    if (options?.source) {
-      filter.source = options.source;
-    }
-
-    const result = await this.mcpClient!.callTool({
-      name: 'qmd_recall',
-      arguments: {
-        query,
-        limit: options?.limit || 10,
-        filter: Object.keys(filter).length > 0 ? filter : undefined
-      }
-    });
-
-    const text = this.extractTextContent(result.content);
-    if (!text) return [];
-
     try {
-      const results = JSON.parse(text);
-      return results.map((r: Record<string, unknown>) => ({
-        entry: {
-          id: r.id as string,
-          content: r.content as string,
-          source: (r.metadata as Record<string, unknown>)?.source as MemorySource || 'user',
-          workspaceId: (r.metadata as Record<string, unknown>)?.workspaceId as string | undefined,
-          metadata: (r.metadata as Record<string, unknown>) || {},
-          createdAt: r.createdAt as string,
-        },
-        score: r.score as number
-      }));
+      const result = await this.mcpClient!.callTool({
+        name: 'vector_search',
+        arguments: {
+          query,
+          limit: options?.limit || 10,
+          minScore: 0.3,
+        }
+      });
+
+      return this.parseSearchResults(result);
     } catch {
-      console.error('[Memory] Failed to parse search results');
-      return [];
+      // Fallback to keyword search if vector search fails
+      try {
+        const result = await this.mcpClient!.callTool({
+          name: 'search',
+          arguments: {
+            query,
+            limit: options?.limit || 10,
+          }
+        });
+        return this.parseSearchResults(result);
+      } catch (error) {
+        console.error('[Memory] Search failed:', error);
+        return [];
+      }
     }
+  }
+
+  /**
+   * Parse QMD search results into MemorySearchResult format
+   */
+  private parseSearchResults(result: { content: unknown }): MemorySearchResult[] {
+    const content = result.content as Array<{ type: string; text: string }>;
+    const textBlock = content?.find(c => c.type === 'text');
+    if (!textBlock?.text) return [];
+
+    // Try structured content first
+    const structured = result as { structuredContent?: { results?: Array<{
+      docid: string;
+      file: string;
+      title: string;
+      score: number;
+      snippet: string;
+    }> } };
+
+    if (structured.structuredContent?.results) {
+      return structured.structuredContent.results.map(r => ({
+        entry: {
+          id: r.docid,
+          content: r.snippet,
+          source: 'user' as MemorySource,
+          metadata: { file: r.file, title: r.title },
+          createdAt: new Date().toISOString(),
+        },
+        score: r.score,
+      }));
+    }
+
+    // Parse text response
+    const results: MemorySearchResult[] = [];
+    const lines = textBlock.text.split('\n').filter(l => l.trim());
+
+    for (const line of lines.slice(1)) {
+      const match = line.match(/^#(\w+)\s+(\d+)%\s+(.+)\s+-\s+(.+)$/);
+      if (match) {
+        results.push({
+          entry: {
+            id: match[1],
+            content: match[3],
+            source: 'user' as MemorySource,
+            metadata: { file: match[2], title: match[3] },
+            createdAt: new Date().toISOString(),
+          },
+          score: parseInt(match[2], 10) / 100,
+        });
+      }
+    }
+
+    return results;
   }
 
   async get(id: string): Promise<MemoryEntry | null> {
     this.ensureInitialized();
 
-    // QMD doesn't have a direct get by ID, so we search with the ID
-    const results = await this.search(id, { limit: 1 });
-    const found = results.find(r => r.entry.id === id);
-    return found?.entry || null;
-  }
+    // Use QMD's get tool to retrieve by docid
+    try {
+      const result = await this.mcpClient!.callTool({
+        name: 'get',
+        arguments: {
+          file: `#${id}`,
+        }
+      });
 
-  async delete(id: string): Promise<boolean> {
-    this.ensureInitialized();
-
-    const result = await this.mcpClient!.callTool({
-      name: 'qmd_forget',
-      arguments: {
-        query: id,
-        limit: 1
+      const content = result.content as Array<{ type: string; resource?: { text: string } }>;
+      const resourceBlock = content?.find(c => c.type === 'resource');
+      if (resourceBlock?.resource?.text) {
+        return {
+          id,
+          content: resourceBlock.resource.text,
+          source: 'user',
+          createdAt: new Date().toISOString(),
+        };
       }
-    });
+    } catch {
+      // Not found
+    }
 
-    const text = this.extractTextContent(result.content);
-    const deleted = parseInt(text || '0', 10);
-    return deleted > 0;
+    return null;
   }
 
-  async forget(query: string, limit?: number): Promise<number> {
-    this.ensureInitialized();
-
-    const result = await this.mcpClient!.callTool({
-      name: 'qmd_forget',
-      arguments: {
-        query,
-        limit: limit || 10
-      }
-    });
-
-    const text = this.extractTextContent(result.content);
-    return parseInt(text || '0', 10);
+  /**
+   * Delete is not supported - QMD indexes files, not individual entries
+   * To delete content, remove it from the source markdown file
+   */
+  async delete(_id: string): Promise<boolean> {
+    console.warn('[Memory] Delete not supported by QMD - remove content from source file instead');
+    return false;
   }
 
+  /**
+   * Forget is not supported - QMD indexes files, not individual entries
+   */
+  async forget(_query: string, _limit?: number): Promise<number> {
+    console.warn('[Memory] Forget not supported by QMD - remove content from source file instead');
+    return 0;
+  }
+
+  /**
+   * Check QMD status instead of reflect (QMD doesn't have reflect)
+   */
   async reflect(): Promise<void> {
     this.ensureInitialized();
 
-    await this.mcpClient!.callTool({
-      name: 'qmd_reflect',
-      arguments: {}
-    });
+    try {
+      const result = await this.mcpClient!.callTool({
+        name: 'status',
+        arguments: {}
+      });
+
+      const content = result.content as Array<{ type: string; text: string }>;
+      const textBlock = content?.find(c => c.type === 'text');
+      if (textBlock?.text) {
+        console.log('[Memory] QMD status:', textBlock.text.split('\n')[0]);
+      }
+    } catch (error) {
+      console.error('[Memory] Status check failed:', error);
+    }
   }
 
   async close(): Promise<void> {
@@ -192,18 +277,11 @@ export class MemoryManager {
       throw new Error('Memory manager not initialized. Call initialize() first.');
     }
   }
-
-  private extractTextContent(content: unknown): string {
-    if (Array.isArray(content)) {
-      const textBlock = content.find((c: Record<string, unknown>) => c.type === 'text');
-      return (textBlock as Record<string, unknown>)?.text as string || '';
-    }
-    return '';
-  }
 }
 
 /**
  * Create a memory manager instance
+ * @deprecated Use createHybridMemoryManager instead
  */
 export function createMemoryManager(config: MemoryConfig, dataDir: string): MemoryManager {
   return new MemoryManager(config, dataDir);

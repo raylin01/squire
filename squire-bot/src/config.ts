@@ -1,5 +1,7 @@
 /**
  * SquireBot Configuration
+ *
+ * Configuration for the Discord bot that interfaces with Squire core.
  */
 
 import fs from 'fs';
@@ -14,12 +16,12 @@ export interface SquireBotConfig {
   discordToken: string;
   discordAppId: string;
 
-  // WebSocket Server
-  wsPort: number;
-  wsHost: string;
-
-  // Authentication
-  runnerToken: string;  // Token that runner-agent must provide
+  // Squire core settings
+  squire?: {
+    provider?: 'claude' | 'gemini' | 'codex';
+    model?: string;
+    permissionMode?: 'strict' | 'autoSafe' | 'permissive';
+  };
 
   // Behavior
   allowedGuilds?: string[];
@@ -27,27 +29,41 @@ export interface SquireBotConfig {
 
   // Forum configuration
   forums?: Record<string, ForumConfig>;
+
+  // Plugin system
+  plugins?: PluginConfig;
+}
+
+export interface PluginConfig {
+  // Enable safe mode (disable all plugins)
+  safeMode?: boolean;
+
+  // Auto-enable newly discovered plugins
+  autoEnable?: boolean;
+
+  // Explicitly disabled plugins (by name)
+  disabled?: string[];
+
+  // Explicitly enabled plugins (by name)
+  enabled?: string[];
+
+  // Custom plugins directory (default: ~/.squirebot/plugins)
+  pluginsDir?: string;
 }
 
 export interface ForumConfig {
   guildId: string;
   channelId: string;
-  tagConfig: {
-    bugTagId: string;
-    featureTagId: string;
-    questionTagId: string;
-    taskTagId: string;
-    statusTags: Record<string, string>;
-    priorityTags: Record<string, string>;
-    assigneeTags: Record<string, string>;
+  tagConfig?: {
+    bugTagId?: string;
+    featureTagId?: string;
+    questionTagId?: string;
+    taskTagId?: string;
+    statusTags?: Record<string, string>;
+    priorityTags?: Record<string, string>;
+    assigneeTags?: Record<string, string>;
   };
 }
-
-const DEFAULT_CONFIG: Partial<SquireBotConfig> = {
-  wsPort: 3123,
-  wsHost: '0.0.0.0',
-  runnerToken: '',
-};
 
 export function ensureConfigDir(): void {
   if (!fs.existsSync(SQUIREBOT_DIR)) {
@@ -62,8 +78,7 @@ export function loadConfig(): SquireBotConfig | null {
 
   try {
     const content = fs.readFileSync(CONFIG_FILE, 'utf-8');
-    const fileConfig = JSON.parse(content);
-    return { ...DEFAULT_CONFIG, ...fileConfig } as SquireBotConfig;
+    return JSON.parse(content) as SquireBotConfig;
   } catch (error) {
     console.error(`[SquireBot] Error loading config: ${error}`);
     return null;
@@ -78,15 +93,21 @@ export function saveConfig(config: SquireBotConfig): void {
 
 export function createDefaultConfig(
   discordToken: string,
-  discordAppId: string,
-  runnerToken?: string
+  discordAppId: string
 ): SquireBotConfig {
   const config: SquireBotConfig = {
     discordToken,
     discordAppId,
-    wsPort: 3123,
-    wsHost: '0.0.0.0',
-    runnerToken: runnerToken || generateToken(),
+    squire: {
+      provider: 'claude',
+      permissionMode: 'autoSafe',
+    },
+    plugins: {
+      safeMode: false,
+      autoEnable: true,
+      disabled: [],
+      enabled: [],
+    },
   };
 
   saveConfig(config);
@@ -99,13 +120,4 @@ export function getConfigPath(): string {
 
 export function getSquireBotDir(): string {
   return SQUIREBOT_DIR;
-}
-
-function generateToken(): string {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  let token = '';
-  for (let i = 0; i < 32; i++) {
-    token += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return token;
 }

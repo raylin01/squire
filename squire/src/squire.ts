@@ -24,11 +24,17 @@ import type {
   CreateWorkspaceOptions,
   RememberOptions,
   ScheduleTaskOptions,
+  SDKProvider,
 } from './types.js';
 import { resolveConfig, ensureSquireDir } from './config.js';
-import { MemoryManager, createMemoryManager } from './memory/index.js';
+import { MemoryManager, createMemoryManager, HybridMemoryManager, createHybridMemoryManager } from './memory/index.js';
 import { SkillManager, createSkillManager } from './skills/index.js';
 import { Scheduler, createScheduler } from './scheduler/index.js';
+import { TicketManager, createTicketManager } from './tickets/index.js';
+import { PersonalityManager, createPersonalityManager } from './personality/index.js';
+import { createSDKClient, BaseSDKClient } from './sdk/index.js';
+import { toolRegistry, setCommunicationHandler, communicate, setSelfManageState, setMemoryManager as setToolMemoryManager, setScheduler as setToolScheduler, setTicketManager as setToolTicketManager, setSquireInstance } from './tools/index.js';
+import { checkBashPermission, checkToolPermission } from './permissions/index.js';
 
 /**
  * Squire - The main personal AI assistant class
@@ -40,15 +46,61 @@ export class Squire extends EventEmitter {
   private running: boolean = false;
 
   // Subsystems
-  private memoryManager: MemoryManager | null = null;
+  private memoryManager: MemoryManager | HybridMemoryManager | null = null;
   private skillManager: SkillManager | null = null;
   private scheduler: Scheduler | null = null;
-  private ticketManager: unknown = null;
+  private ticketManager: TicketManager | null = null;
+  private personalityManager: PersonalityManager | null = null;
+
+  // SDK Client
+  private sdkClient: BaseSDKClient | null = null;
+
+  // Heartbeat/activity tracking
+  private lastHeartbeat: Date = new Date();
+  private currentActivity: string = 'idle';
 
   constructor(config: Partial<SquireConfig> & { squireId: string }) {
     super();
     this.config = resolveConfig(config);
     ensureSquireDir();
+    this.setupToolHandlers();
+  }
+
+  /**
+   * Set up tool handlers to connect tools to Squire functionality
+   */
+  private setupToolHandlers(): void {
+    // Communication handler - connects squire_communicate to actual output
+    setCommunicationHandler(async (options) => {
+      this.emitEvent('communication', {
+        type: options.type,
+        content: options.content,
+        title: options.title,
+        color: options.color,
+        ping: options.ping,
+      });
+      return `Message sent: ${options.type}`;
+    });
+
+    // Self-management state
+    setSelfManageState({
+      restart: async () => {
+        await this.stop();
+        process.exit(0); // External process manager should restart
+      },
+      switchSDK: async (provider: SDKProvider) => {
+        await this.switchSDK(provider);
+      },
+      updateConfig: async (updates: Record<string, unknown>) => {
+        this.config = { ...this.config, ...updates } as SquireConfig;
+      },
+      reloadSkills: async () => {
+        if (this.skillManager) {
+          await this.skillManager.initialize();
+        }
+      },
+      getConfig: () => ({ ...this.config }) as Record<string, unknown>,
+    });
   }
 
   // ==========================================================================
@@ -65,23 +117,33 @@ export class Squire extends EventEmitter {
     }
 
     console.log(`[Squire] Starting ${this.config.name}...`);
+    this.updateActivity('starting');
 
     // Load existing workspaces from storage
     await this.loadWorkspaces();
 
-    // Initialize memory system (Phase 2)
+    // Initialize SDK client
+    await this.initializeSDK();
+
+    // Initialize memory system (use hybrid memory manager)
     if (this.config.memory.enabled) {
-      this.memoryManager = createMemoryManager(this.config.memory, this.config.dataDir);
       try {
+        // Use HybridMemoryManager for enhanced memory features
+        this.memoryManager = createHybridMemoryManager({
+          config: this.config.memory,
+          dataDir: this.config.dataDir,
+          squireName: this.config.name,
+        });
         await this.memoryManager.initialize();
-        console.log('[Squire] Memory system initialized');
+        setToolMemoryManager(this.memoryManager as HybridMemoryManager);
+        console.log('[Squire] Hybrid memory system initialized');
       } catch (error) {
         console.error('[Squire] Failed to initialize memory system:', error);
         this.memoryManager = null;
       }
     }
 
-    // Load skills (Phase 3)
+    // Load skills
     this.skillManager = createSkillManager({
       config: this.config.skills,
       skillsDir: this.config.skillsDir,
@@ -94,12 +156,23 @@ export class Squire extends EventEmitter {
       this.skillManager = null;
     }
 
-    // Start scheduler if daemon mode (Phase 4)
+    // Initialize ticket manager
+    const ticketsDbPath = path.join(this.config.dataDir, 'tickets.db');
+    this.ticketManager = createTicketManager(ticketsDbPath);
+    setToolTicketManager(this.ticketManager);
+
+    // Initialize personality manager
+    this.personalityManager = createPersonalityManager(this.config.personality);
+    console.log('[Squire] Personality system initialized');
+
+    // Start scheduler if daemon mode
     if (this.config.daemonMode) {
       this.scheduler = createScheduler({
         dbPath: path.join(this.config.dataDir, 'scheduler.db'),
         pollInterval: this.config.pollInterval,
       });
+
+      setToolScheduler(this.scheduler);
 
       // Set up task executor
       this.scheduler.setExecutor(async (task) => {
@@ -110,9 +183,74 @@ export class Squire extends EventEmitter {
       console.log('[Squire] Scheduler started (daemon mode)');
     }
 
+    // Set squire instance for self-modification tools
+    setSquireInstance({
+      getConfig: () => this.config,
+      getPersonalityManager: () => this.personalityManager,
+    });
+
     this.running = true;
+    this.updateActivity('ready');
     this.emitEvent('squire_started', { squireId: this.config.squireId });
     console.log(`[Squire] ${this.config.name} started successfully`);
+  }
+
+  /**
+   * Initialize the SDK client
+   */
+  private async initializeSDK(): Promise<void> {
+    try {
+      this.sdkClient = createSDKClient({
+        provider: this.config.sdk.provider,
+        model: this.config.sdk.model || this.config.model,
+        cwd: process.cwd(),
+        permissionMode: this.config.permissions.mode,
+        cliPath: this.config.sdk.cliPath,
+      });
+
+      // Set up SDK event handlers
+      this.sdkClient.on('output', (output) => {
+        // Internal output - don't show to user by default
+        this.lastHeartbeat = new Date();
+      });
+
+      this.sdkClient.on('tool_use', async (event) => {
+        this.updateActivity(`using ${event.toolName}`);
+        await this.handleToolUse(event);
+      });
+
+      this.sdkClient.on('approval', async (event) => {
+        this.updateActivity('awaiting approval');
+        await this.handleApproval(event);
+      });
+
+      this.sdkClient.on('complete', () => {
+        this.updateActivity('ready');
+      });
+
+      this.sdkClient.on('error', (error) => {
+        console.error('[Squire] SDK error:', error);
+        this.updateActivity('error');
+      });
+
+      console.log(`[Squire] SDK initialized: ${this.config.sdk.provider}`);
+    } catch (error) {
+      console.error('[Squire] Failed to initialize SDK:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Switch to a different SDK provider
+   */
+  async switchSDK(provider: SDKProvider): Promise<void> {
+    if (this.sdkClient) {
+      await this.sdkClient.close();
+    }
+
+    this.config.sdk.provider = provider;
+    await this.initializeSDK();
+    console.log(`[Squire] Switched to ${provider} SDK`);
   }
 
   /**
@@ -124,11 +262,22 @@ export class Squire extends EventEmitter {
     }
 
     console.log(`[Squire] Stopping ${this.config.name}...`);
+    this.updateActivity('stopping');
+
+    // Close SDK client
+    if (this.sdkClient) {
+      await this.sdkClient.close();
+    }
 
     // Stop scheduler
     if (this.scheduler) {
       this.scheduler.stop();
       this.scheduler.close();
+    }
+
+    // Close ticket manager
+    if (this.ticketManager) {
+      this.ticketManager.close();
     }
 
     // Close memory manager
@@ -297,6 +446,94 @@ export class Squire extends EventEmitter {
   }
 
   // ==========================================================================
+  // Enhanced Memory Methods (Hybrid System)
+  // ==========================================================================
+
+  /**
+   * Get memory overview
+   */
+  async getMemoryOverview(): Promise<string | null> {
+    if (!this.memoryManager) {
+      return null;
+    }
+
+    // Check if hybrid memory manager
+    if ('getCoreMemoryOverview' in this.memoryManager) {
+      const hybridManager = this.memoryManager as import('./memory/hybrid-manager.js').HybridMemoryManager;
+      return hybridManager.getCoreMemoryOverview();
+    }
+
+    return null;
+  }
+
+  /**
+   * Get today's daily summary
+   */
+  async getDailySummary(): Promise<string> {
+    if (!this.memoryManager) {
+      return 'Memory system not initialized.';
+    }
+
+    // Check if hybrid memory manager
+    if ('generateDailySummary' in this.memoryManager) {
+      const hybridManager = this.memoryManager as import('./memory/hybrid-manager.js').HybridMemoryManager;
+      return hybridManager.generateDailySummary();
+    }
+
+    return 'Daily logs not available.';
+  }
+
+  /**
+   * Get recent memory activity
+   */
+  async getRecentMemoryActivity(days: number = 7): Promise<{
+    totalCommits: number;
+    totalTasks: number;
+    activeWorkspaces: string[];
+    highlights: string[];
+  } | null> {
+    if (!this.memoryManager) {
+      return null;
+    }
+
+    // Check if hybrid memory manager
+    if ('getRecentActivity' in this.memoryManager) {
+      const hybridManager = this.memoryManager as import('./memory/hybrid-manager.js').HybridMemoryManager;
+      return hybridManager.getRecentActivity(days);
+    }
+
+    return null;
+  }
+
+  /**
+   * Record a memory preference
+   */
+  async recordMemoryPreference(preference: string, workspaceId?: string): Promise<void> {
+    if (!this.memoryManager) {
+      throw new Error('Memory system not initialized');
+    }
+
+    if ('recordPreference' in this.memoryManager) {
+      const hybridManager = this.memoryManager as import('./memory/hybrid-manager.js').HybridMemoryManager;
+      await hybridManager.recordPreference(preference, { workspaceId });
+    }
+  }
+
+  /**
+   * Record a memory fact
+   */
+  async recordMemoryFact(fact: string, workspaceId?: string): Promise<void> {
+    if (!this.memoryManager) {
+      throw new Error('Memory system not initialized');
+    }
+
+    if ('recordFact' in this.memoryManager) {
+      const hybridManager = this.memoryManager as import('./memory/hybrid-manager.js').HybridMemoryManager;
+      await hybridManager.recordFact(fact, { workspaceId });
+    }
+  }
+
+  // ==========================================================================
   // Messaging
   // ==========================================================================
 
@@ -309,24 +546,224 @@ export class Squire extends EventEmitter {
       throw new Error(`Workspace not found: ${workspaceId}`);
     }
 
+    if (!this.sdkClient) {
+      throw new Error('SDK client not initialized');
+    }
+
     // Update workspace activity
     workspace.lastActivityAt = new Date().toISOString();
+    this.setActiveWorkspace(workspaceId);
+    this.updateActivity('thinking');
 
-    // TODO: Build context with memory
-    // TODO: Build system prompt with skills
-    // TODO: Call LLM API
-    // TODO: Process tool calls
-    // TODO: Store in memory if needed
+    // Build message with compact context
+    let contextContent = content;
 
+    // Add compact personality summary (not full prompt every time)
+    if (this.personalityManager) {
+      const personality = this.personalityManager.getPersonality(workspaceId);
+      const traits = personality.traits;
+
+      // Compact summary - just key traits
+      const personalitySummary = `[You are ${this.config.name}. Tone: ${traits.tone}, Verbosity: ${traits.verbosity}, Technicality: ${traits.technicality}]`;
+      contextContent = `${personalitySummary}\n\n${content}`;
+
+      // Add custom instructions if present
+      if (personality.customInstructions) {
+        contextContent = `${personalitySummary}\n[Additional: ${personality.customInstructions}]\n\n${content}`;
+      }
+    }
+
+    // Smart memory search - only when likely needed
+    if (this.memoryManager && this.shouldSearchMemory(content)) {
+      try {
+        const relevantMemories = await this.memoryManager.search(content, { limit: 3 });
+        if (relevantMemories.length > 0) {
+          const memoryContext = relevantMemories
+            .map(m => `• ${m.entry.content}`)
+            .join('\n');
+          contextContent = `[Relevant memories]\n${memoryContext}\n\n${contextContent}`;
+        }
+      } catch (error) {
+        console.error('[Squire] Failed to search memory:', error);
+      }
+    }
+
+    // Send to SDK
+    await this.sdkClient.sendMessage({ role: 'user', content: contextContent });
+
+    // Return message (actual response comes via events)
     const message: SquireMessage = {
       role: 'assistant',
-      content: 'TODO: Implement LLM integration',
+      content: '', // Will be filled via events
       workspaceId,
       timestamp: new Date().toISOString(),
     };
 
     this.emitEvent('message_sent', { message });
     return message;
+  }
+
+  /**
+   * Determine if a message likely needs memory context
+   */
+  private shouldSearchMemory(content: string): boolean {
+    const lower = content.toLowerCase();
+
+    // Keywords that suggest memory is relevant
+    const memoryTriggers = [
+      // Questions about past events
+      'remember', 'recall', 'last time', 'before', 'previously', 'earlier',
+      // Questions about preferences
+      'my favorite', 'i prefer', 'i like', 'my preference', 'usually',
+      // Questions about context
+      'what did', 'when did', 'how did', 'where did', 'who did',
+      // Reference to shared history
+      'we discussed', 'we talked', 'you said', 'i told', 'i mentioned',
+      // Continuation words
+      'continue', 'resume', 'back to', 'again', 'more about',
+    ];
+
+    // Check if any trigger word is present
+    for (const trigger of memoryTriggers) {
+      if (lower.includes(trigger)) {
+        return true;
+      }
+    }
+
+    // Questions often need context
+    if (lower.includes('?') && (
+      lower.includes('what') ||
+      lower.includes('how') ||
+      lower.includes('why') ||
+      lower.includes('when') ||
+      lower.includes('where') ||
+      lower.includes('who')
+    )) {
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Handle tool use from SDK
+   */
+  private async handleToolUse(event: { toolName: string; toolId: string; input: Record<string, unknown> }): Promise<void> {
+    if (!this.sdkClient) return;
+
+    // Check if this is a built-in Squire tool
+    if (toolRegistry.has(event.toolName)) {
+      try {
+        const result = await toolRegistry.execute(event.toolName, event.input);
+        await this.sdkClient.sendToolResult({
+          toolUseId: event.toolId,
+          content: result,
+        });
+      } catch (error) {
+        await this.sdkClient.sendToolResult({
+          toolUseId: event.toolId,
+          content: `Error: ${error instanceof Error ? error.message : String(error)}`,
+          isError: true,
+        });
+      }
+    }
+    // For bash commands, check permissions
+    else if (event.toolName === 'bash' || event.toolName === 'Bash') {
+      const command = event.input.command as string;
+      const permissionReason = checkBashPermission(command, this.config.permissions.mode);
+
+      if (permissionReason) {
+        // Needs approval - will be handled by approval event
+        return;
+      }
+
+      // Auto-approved, let SDK handle execution
+    }
+  }
+
+  /**
+   * Handle approval request from SDK
+   */
+  private async handleApproval(event: { requestId: string; toolName: string; toolInput: Record<string, unknown> }): Promise<void> {
+    if (!this.sdkClient) return;
+
+    const permissionReason = this.checkPermissionNeeded(event.toolName, event.toolInput);
+
+    if (!permissionReason) {
+      // Auto-approve
+      await this.sdkClient.sendApproval(event.requestId, 'allow');
+      return;
+    }
+
+    // Emit approval event for external handling (e.g., Discord, CLI)
+    this.emitEvent('approval_required', {
+      requestId: event.requestId,
+      toolName: event.toolName,
+      toolInput: event.toolInput,
+      reason: permissionReason,
+    });
+  }
+
+  /**
+   * Check if a tool use needs permission
+   */
+  private checkPermissionNeeded(toolName: string, input: Record<string, unknown>): string | null {
+    const mode = this.config.permissions.mode;
+
+    // Check blocked tools
+    if (this.config.permissions.blockedTools.includes(toolName)) {
+      return `${toolName} is blocked`;
+    }
+
+    // Check allowed tools
+    if (this.config.permissions.allowedTools.includes(toolName)) {
+      return null;
+    }
+
+    // Check bash permissions
+    if (toolName === 'bash' || toolName === 'Bash') {
+      const command = input.command as string;
+      return checkBashPermission(command, mode);
+    }
+
+    // Check general tool permissions
+    return checkToolPermission(toolName, input, mode);
+  }
+
+  /**
+   * Respond to an approval request
+   */
+  async respondToApproval(requestId: string, approved: boolean, updatedInput?: Record<string, unknown>): Promise<void> {
+    if (!this.sdkClient) return;
+    await this.sdkClient.sendApproval(requestId, approved ? 'allow' : 'deny', updatedInput);
+  }
+
+  // ==========================================================================
+  // Status & Activity
+  // ==========================================================================
+
+  /**
+   * Update current activity (for status display)
+   */
+  private updateActivity(activity: string): void {
+    this.currentActivity = activity;
+    this.lastHeartbeat = new Date();
+    this.emitEvent('status', {
+      activity,
+      timestamp: this.lastHeartbeat.toISOString(),
+    });
+  }
+
+  /**
+   * Get current status
+   */
+  getStatus(): { running: boolean; activity: string; lastHeartbeat: string; sdk: string } {
+    return {
+      running: this.running,
+      activity: this.currentActivity,
+      lastHeartbeat: this.lastHeartbeat.toISOString(),
+      sdk: this.config.sdk.provider,
+    };
   }
 
   // ==========================================================================
@@ -442,6 +879,31 @@ export class Squire extends EventEmitter {
     return this.skillManager.loadSkill(skillPath);
   }
 
+  /**
+   * Get the personality manager
+   */
+  getPersonalityManager(): PersonalityManager | null {
+    return this.personalityManager;
+  }
+
+  /**
+   * Set workspace personality override
+   */
+  setWorkspacePersonality(workspaceId: string, personality: Partial<import('./types.js').Personality>): void {
+    if (this.personalityManager) {
+      this.personalityManager.setWorkspaceOverride(workspaceId, personality);
+    }
+  }
+
+  /**
+   * Clear workspace personality override
+   */
+  clearWorkspacePersonality(workspaceId: string): void {
+    if (this.personalityManager) {
+      this.personalityManager.clearWorkspaceOverride(workspaceId);
+    }
+  }
+
   // ==========================================================================
   // Events
   // ==========================================================================
@@ -510,3 +972,10 @@ export class Squire extends EventEmitter {
 
 // Re-export for convenience
 export type { SquireConfig } from './types.js';
+
+/**
+ * Create a Squire instance with default configuration
+ */
+export function createSquire(config: Partial<SquireConfig> & { squireId: string }): Squire {
+  return new Squire(config);
+}

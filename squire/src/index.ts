@@ -5,7 +5,7 @@
  */
 
 // Main class
-export { Squire } from './squire.js';
+export { Squire, createSquire } from './squire.js';
 
 // Configuration
 export {
@@ -20,7 +20,25 @@ export {
   getSquireDir,
   getDataDir,
   getConfigPath,
+  getToolsDir,
+  getDefaultPersonality,
 } from './config.js';
+
+// Personality
+export {
+  PersonalityManager,
+  createPersonalityManager,
+  PERSONALITY_TEMPLATES,
+  getPersonalityTemplate,
+  getPersonalityTemplateList,
+  TRAIT_DESCRIPTIONS,
+  getTraitDescription,
+} from './personality/index.js';
+export type { PersonalityTemplateName } from './personality/templates.js';
+
+// Tools
+export { toolRegistry, defineTool, setSquireInstance } from './tools/index.js';
+export { createToolLoader } from './tools/loader.js';
 
 // Types
 export type {
@@ -28,7 +46,11 @@ export type {
   SquireConfig,
   MemoryConfig,
   SkillsConfig,
+  ToolsConfig,
   PermissionConfig,
+  PersonalityConfig,
+  Personality,
+  PersonalityTraits,
 
   // Workspace
   Workspace,
@@ -53,6 +75,12 @@ export type {
   SkillFrontmatter,
   SkillMetadata,
   SkillInstallStep,
+
+  // Tools
+  ToolFrontmatter,
+  ToolMetadata,
+  SquireTool,
+  ToolHandlerContext,
 
   // Messages
   SquireMessage,

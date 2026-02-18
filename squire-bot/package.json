@@ -1,7 +1,7 @@
 {
   "name": "@squire/bot",
   "version": "0.1.0",
-  "description": "Minimal Discord bot for Squire - passes messages to runner-agent",
+  "description": "Discord bot for Squire - standalone AI assistant",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -13,6 +13,7 @@
     "dev": "node --watch dist/index.js"
   },
   "dependencies": {
+    "@squire/core": "file:../squire",
     "discord.js": "^14.18.0",
     "ws": "^8.18.0"
   },

@@ -1,48 +1,32 @@
 /**
  * Forum Handler
  *
- * Watches forum channels for new posts and replies, forwarding to runner-agent.
+ * Watches forum channels for new posts and replies, forwarding to Squire.
  */
 
 import {
   Events,
-  ForumChannel,
   ThreadChannel,
   ChannelType,
   Message,
 } from 'discord.js';
 import type { Client } from 'discord.js';
-import type { SquireBotWebSocketServer } from '../ws-server.js';
-import type { SquireBotConfig, ForumConfig } from '../config.js';
+import type { Squire } from '@squire/core';
+import type { SquireBotConfig } from '../config.js';
 
-export interface ForumPostCreatedEvent {
-  type: 'forum_post_created';
-  guildId: string;
-  forumChannelId: string;
-  postId: string;
-  title: string;
-  content: string;
-  authorId: string;
-  authorName: string;
-  appliedTags: string[];
-  timestamp: string;
+interface WorkspaceManager {
+  getOrCreateWorkspace(channelId: string, channelName: string, source: 'discord_dm' | 'discord_channel' | 'discord_forum'): Promise<string>;
 }
 
-export interface ForumPostRepliedEvent {
-  type: 'forum_post_replied';
-  guildId: string;
-  forumChannelId: string;
-  postId: string;
-  replyId: string;
-  content: string;
-  authorId: string;
-  authorName: string;
-  timestamp: string;
+interface DiscordCommunicator {
+  registerChannel(workspaceId: string, channel: any): void;
 }
 
 export function setupForumHandler(
   client: Client,
-  wsServer: SquireBotWebSocketServer,
+  squire: Squire,
+  workspaceManager: WorkspaceManager,
+  communicator: DiscordCommunicator,
   config: SquireBotConfig
 ): void {
   // Track configured forums
@@ -66,36 +50,37 @@ export function setupForumHandler(
 
     // Get the starter message
     let content = '';
-    let authorId = 'unknown';
-    let authorName = 'Unknown';
 
     try {
       const starterMessage = await thread.fetchStarterMessage();
       if (starterMessage) {
         content = starterMessage.content || '';
-        authorId = starterMessage.author.id;
-        authorName = starterMessage.author.username;
       }
     } catch (error) {
       console.error('[Forum] Could not fetch starter message:', error);
     }
 
-    const event: ForumPostCreatedEvent = {
-      type: 'forum_post_created',
-      guildId: thread.guildId || '',
-      forumChannelId: parent.id,
-      postId: thread.id,
-      title: thread.name,
-      content,
-      authorId,
-      authorName,
-      appliedTags: thread.appliedTags,
-      timestamp: new Date().toISOString(),
-    };
+    if (!content) return;
 
     console.log(`[Forum] New post: ${thread.name}`);
 
-    wsServer.broadcast('forum_post_created', event);
+    // Create workspace for this thread
+    const workspaceId = await workspaceManager.getOrCreateWorkspace(
+      thread.id,
+      thread.name,
+      'discord_forum'
+    );
+
+    // Register thread for responses
+    communicator.registerChannel(workspaceId, thread);
+
+    // Send to Squire with context
+    const contextMessage = `New forum post: "${thread.name}"\n\n${content}`;
+    try {
+      await squire.sendMessage(workspaceId, contextMessage);
+    } catch (error) {
+      console.error('[Forum] Error:', error);
+    }
   });
 
   // Handle replies in forum posts
@@ -111,21 +96,27 @@ export function setupForumHandler(
     // Only watch configured forums, or all if none configured
     if (configuredForums.size > 0 && !configuredForums.has(parent.id)) return;
 
-    const event: ForumPostRepliedEvent = {
-      type: 'forum_post_replied',
-      guildId: thread.guildId || '',
-      forumChannelId: parent.id,
-      postId: thread.id,
-      replyId: message.id,
-      content: message.content,
-      authorId: message.author.id,
-      authorName: message.author.username,
-      timestamp: message.createdAt.toISOString(),
-    };
+    const content = message.content.trim();
+    if (!content) return;
 
-    console.log(`[Forum] Reply in ${thread.name}: ${message.content.slice(0, 30)}...`);
+    console.log(`[Forum] Reply in ${thread.name}: ${content.slice(0, 30)}...`);
 
-    wsServer.broadcast('forum_post_replied', event);
+    // Get existing workspace for this thread
+    const workspaceId = await workspaceManager.getOrCreateWorkspace(
+      thread.id,
+      thread.name,
+      'discord_forum'
+    );
+
+    // Register thread for responses
+    communicator.registerChannel(workspaceId, thread);
+
+    // Send to Squire
+    try {
+      await squire.sendMessage(workspaceId, content);
+    } catch (error) {
+      console.error('[Forum] Error:', error);
+    }
   });
 
   console.log('[Forum] Handler initialized');

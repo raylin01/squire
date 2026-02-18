@@ -18,8 +18,11 @@ export interface SquireConfig {
   memoryDbPath: string;
   skillsDir: string;
 
-  // Model configuration
-  model: string;
+  // SDK configuration
+  sdk: SDKConfig;
+
+  // Model configuration (optional override)
+  model?: string;
   fallbackModel?: string;
 
   // Behavior
@@ -32,7 +35,13 @@ export interface SquireConfig {
   // Skills
   skills: SkillsConfig;
 
-  // Permissions (simpler than DisCode)
+  // Tools
+  tools: ToolsConfig;
+
+  // Personality
+  personality: PersonalityConfig;
+
+  // Permissions
   permissions: PermissionConfig;
 }
 
@@ -52,10 +61,50 @@ export interface SkillsConfig {
   autoInstall: boolean;
 }
 
+export interface ToolsConfig {
+  globalDir: string;     // ~/.squire/tools
+  projectDir: string;    // ./.squire/tools
+  autoInstall: boolean;
+  searchEnabled: boolean;
+}
+
+// ============================================================================
+// Personality System
+// ============================================================================
+
+export interface PersonalityTraits {
+  tone: 'professional' | 'casual' | 'friendly' | 'formal';
+  verbosity: 'concise' | 'balanced' | 'detailed';
+  technicality: 'simple' | 'moderate' | 'expert';
+  enthusiasm: 'reserved' | 'neutral' | 'enthusiastic';
+  humor: 'none' | 'subtle' | 'moderate';
+}
+
+export interface Personality {
+  name: string;
+  description: string;
+  traits: PersonalityTraits;
+  customInstructions?: string;
+}
+
+export interface PersonalityConfig {
+  default: Personality;
+  workspaceOverrides: Record<string, Partial<Personality>>;
+}
+
 export interface PermissionConfig {
-  mode: 'trust' | 'confirm' | 'ask';
+  mode: 'strict' | 'autoSafe' | 'permissive';
   allowedTools: string[];
   blockedTools: string[];
+}
+
+// SDK Configuration
+export type SDKProvider = 'claude' | 'gemini' | 'codex';
+
+export interface SDKConfig {
+  provider: SDKProvider;
+  model?: string;
+  cliPath?: string;
 }
 
 // ============================================================================
@@ -89,6 +138,8 @@ export interface WorkspaceContext {
   environment?: Record<string, string>;
   guildId?: string;
   channelId?: string;
+  personality?: Partial<Personality>;
+  enabledTools?: string[];
 }
 
 // ============================================================================
@@ -184,6 +235,63 @@ export interface Skill {
   content: string;
   eligible: boolean;
   eligibilityReason?: string;
+}
+
+// ============================================================================
+// External Tools (Plugin System)
+// ============================================================================
+
+export interface ToolMetadata {
+  requires?: {
+    bins?: string[];
+    env?: string[];
+  };
+  keywords?: string[];
+  repository?: string;
+}
+
+export interface ToolFrontmatter {
+  name: string;
+  description: string;
+  version: string;
+  author?: string;
+  inputSchema: {
+    type: 'object';
+    properties: Record<string, {
+      type: string;
+      description?: string;
+      enum?: string[];
+      default?: unknown;
+    }>;
+    required?: string[];
+  };
+  metadata?: {
+    squire?: ToolMetadata;
+  };
+}
+
+export interface SquireTool {
+  name: string;
+  description: string;
+  path: string;
+  source: 'global' | 'project' | 'bundled';
+  frontmatter: ToolFrontmatter;
+  eligible: boolean;
+  eligibilityReason?: string;
+}
+
+export interface ToolHandlerContext {
+  workspaceId?: string;
+  squireId: string;
+  config: SquireConfig;
+  memory?: {
+    remember: (content: string, metadata?: Record<string, unknown>) => Promise<void>;
+    recall: (query: string, limit?: number) => Promise<MemorySearchResult[]>;
+  };
+  communication?: {
+    sendText: (content: string) => Promise<void>;
+    sendEmbed: (title: string, description: string, color?: string) => Promise<void>;
+  };
 }
 
 // ============================================================================
@@ -312,7 +420,10 @@ export type SquireEventType =
   | 'ticket_created'
   | 'ticket_updated'
   | 'ticket_assigned'
-  | 'channel_operation';
+  | 'channel_operation'
+  | 'communication'
+  | 'approval_required'
+  | 'status';
 
 export interface SquireEvent {
   type: SquireEventType;

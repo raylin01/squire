@@ -5,6 +5,9 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "squire": "./dist/cli.js"
+  },
   "exports": {
     ".": {
       "import": "./dist/index.js",
@@ -13,11 +16,16 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "node --test dist/**/*.test.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
     "dev": "tsc --watch"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
+    "@raylin01/claude-client": "^0.1.0",
+    "@raylin01/codex-client": "^0.1.0",
+    "@raylin01/gemini-client": "^0.1.0",
     "better-sqlite3": "^11.0.0",
     "uuid": "^10.0.0",
     "yaml": "^2.6.0"
@@ -26,10 +34,8 @@
     "@types/better-sqlite3": "^7.6.11",
     "@types/node": "^22.0.0",
     "@types/uuid": "^10.0.0",
-    "typescript": "^5.0.0"
-  },
-  "peerDependencies": {
-    "@anthropic-ai/sdk": "^0.30.0"
+    "typescript": "^5.0.0",
+    "vitest": "^2.0.0"
   },
   "engines": {
     "node": ">=18.0.0"

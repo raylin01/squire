@@ -6,133 +6,196 @@ Personal AI assistant with memory, skills, and scheduling capabilities.
 
 ```
 squire/
-├── docs/                # Documentation and phase plans
 ├── squire/              # Core package (@squire/core)
 │   └── src/
 │       ├── squire.ts    # Main Squire class
 │       ├── types.ts     # Type definitions
-│       ├── config.ts    # Configuration management
-│       └── index.ts     # Public API
-└── squire-bot/          # Minimal Discord bot
+│       ├── sdk/         # AI SDK clients (Claude, Gemini, Codex)
+│       ├── memory/      # Memory system (QMD wrapper)
+│       ├── skills/      # Skills system
+│       ├── scheduler/   # Task scheduling
+│       └── tickets/     # Ticket tracking
+└── squire-bot/          # Discord bot
     └── src/
         ├── index.ts         # Entry point
-        ├── ws-server.ts     # WebSocket server
-        └── handlers/        # DM, forum, channel ops
+        ├── handlers/        # DM, forum, questions, slash commands
+        └── plugins/         # Plugin system
+```
+
+## Quick Start
+
+### 1. Install Dependencies
+
+```bash
+bun install
+```
+
+### 2. Install QMD (Memory Backend) - Optional
+
+QMD provides persistent memory with local embeddings. Without it, Squire works but won't remember past conversations.
+
+```bash
+bun install -g @tobilu/qmd
+```
+
+Or with npm:
+```bash
+npm install -g @tobilu/qmd
+```
+
+**Setup collections** (required for QMD to index your content):
+```bash
+# Add collections for your notes/docs
+qmd collection add ~/notes --name notes
+qmd collection add ~/Documents --name docs
+
+# Generate embeddings for semantic search
+qmd embed
+```
+
+QMD runs as an MCP server. Squire will connect to it automatically when the memory system is initialized.
+
+### 3. Build
+
+```bash
+bun run build
+```
+
+### 4. Initialize SquireBot
+
+Create a Discord bot at [Discord Developer Portal](https://discord.com/developers/applications), then:
+
+```bash
+cd squire-bot
+bun run start init \
+  --token=YOUR_DISCORD_BOT_TOKEN \
+  --app-id=YOUR_DISCORD_APP_ID \
+  --provider=claude
+```
+
+This creates `~/.squirebot/config.json` with your settings.
+
+### 5. Start the Bot
+
+```bash
+bun run start
+```
+
+That's it! You can now:
+- DM the bot directly
+- Mention it in guild channels
+- Use slash commands (`/status`, `/memory`, `/help`)
+
+## Configuration
+
+Config file: `~/.squirebot/config.json`
+
+```json
+{
+  "discordToken": "your-bot-token",
+  "discordAppId": "your-app-id",
+  "squire": {
+    "provider": "claude",
+    "permissionMode": "autoSafe"
+  },
+  "plugins": {
+    "safeMode": false,
+    "autoEnable": true
+  }
+}
+```
+
+**Provider options:** `claude`, `gemini`, `codex`
+
+**Permission modes:** `strict`, `autoSafe`, `permissive`
+
+## Features
+
+### Slash Commands
+| Command | Description |
+|---------|-------------|
+| `/status` | Check Squire status |
+| `/memory remember <text>` | Store in memory |
+| `/memory recall <query>` | Search memories |
+| `/memory overview` | Get memory overview |
+| `/task schedule` | Schedule a task |
+| `/task list` | List scheduled tasks |
+| `/config provider <name>` | Switch AI provider |
+| `/help` | Get help |
+
+### Message Handling
+- **DMs**: Message the bot directly
+- **Guild channels**: Mention the bot (@Squire)
+- **Forum posts**: Auto-watched via forum-handler plugin
+
+### AskUserQuestion
+When the AI needs input, it shows an interactive button UI:
+- Single-select: Click to answer
+- Multi-select: Toggle multiple options, then submit
+- "Other": Type custom answer
+- Expiration handling with resend request
+
+### Plugin System
+Plugins in `~/.squirebot/plugins/` or `squire-bot/plugins/`:
+- Hot reload support
+- Safe mode (`--safe` flag disables all plugins)
+- Direct Discord.js access
+
+**Bundled plugins:**
+- `forum-handler` - Watches forum channels
+
+### Memory System (QMD) - Optional
+- Local embeddings (fully private)
+- Hybrid search (vector + BM25)
+- Automatic context injection
+- **Without QMD**: Squire still works, just without persistent memory
+
+### Message Queuing
+Messages are queued while AI is processing - no lost messages!
+
+## Development
+
+```bash
+# Development with auto-reload
+bun run dev
+
+# Type check
+bun x tsc --noEmit
+
+# Build
+bun run build
 ```
 
 ## Architecture
 
-Squire uses a dual-connection architecture where runner-agent connects to both:
+SquireBot is a standalone Discord bot that uses Squire core directly:
 
-1. **DisCode Bot** - For sessions and projects
-2. **SquireBot** - For DMs, forums, and channel management
-
-See [docs/ARCHITECTURE-DECISION.md](docs/ARCHITECTURE-DECISION.md) for details.
-
-## Quick Start
-
-### Install Dependencies
-
-```bash
-# Core package
-cd squire && npm install
-
-# Discord bot
-cd ../squire-bot && npm install
 ```
-
-### Install QMD (Memory Backend)
-
-Squire uses [QMD](https://github.com/tobi/qmd) for persistent memory with local embeddings:
-
-```bash
-npm install -g @tobilu/qmd
-
-# Initialize QMD data directory
-qmd init --data-dir ~/.squire/data/qmd
-```
-
-### Build
-
-```bash
-cd squire && npm run build
-cd ../squire-bot && npm run build
-```
-
-### Configure SquireBot
-
-```bash
-cd squire-bot
-node dist/index.js init \
-  --token=YOUR_DISCORD_BOT_TOKEN \
-  --app-id=YOUR_DISCORD_APP_ID
-```
-
-Save the generated runner token - you'll need it for runner-agent.
-
-### Start SquireBot
-
-```bash
-node dist/index.js
+Discord ←→ squire-bot ←→ Squire Core ←→ AI SDK (Claude/Gemini/Codex)
+                              ↓
+                        Memory (QMD)
+                              ↓
+                        Skills/Plugins
 ```
 
 ## Documentation
 
-See the [docs](docs/) folder for detailed phase plans:
-
+**Phase Plans:**
 - [Phase 1: Core Package](docs/phase-1-core.md)
 - [Phase 2: Memory System](docs/phase-2-memory.md)
 - [Phase 3: Skills System](docs/phase-3-skills.md)
 - [Phase 4: Scheduler](docs/phase-4-scheduler.md)
-- [Phase 5: Workspaces](docs/phase-5-workspaces.md)
-- [Phase 6: SquireBot](docs/phase-6-squirebot.md)
 - [Phase 7: DisCode Integration](docs/phase-7-discode-integration.md)
-- [Phase 8: Discussion Board](docs/phase-8-discussion-board.md)
+- [Architecture Decision](docs/ARCHITECTURE-DECISION.md)
 
-## WebSocket Protocol
+## Status
 
-SquireBot accepts connections from runner-agent at `ws://localhost:3123` (default).
-
-### Authentication
-
-```json
-{ "type": "auth", "data": { "token": "RUNNER_TOKEN" } }
-```
-
-### Events (Bot → Runner)
-
-```json
-{ "type": "event", "data": { "type": "dm_received", "userId": "...", "content": "..." } }
-{ "type": "event", "data": { "type": "forum_post_created", "postId": "...", "title": "..." } }
-```
-
-### Operations (Runner → Bot)
-
-```json
-{ "type": "create_channel", "requestId": "123", "data": { "name": "progress", "guildId": "..." } }
-{ "type": "send_message", "requestId": "124", "data": { "channelId": "...", "content": "Hello!" } }
-```
-
-## Development Status
-
-- [x] Core package structure
-- [x] Configuration management
-- [x] Type definitions
-- [x] SquireBot WebSocket server
-- [x] DM passthrough handler
-- [x] Forum post handler
-- [x] Channel operations handler
-- [ ] Memory system via QMD (Phase 2) - using [QMD](https://github.com/tobi/qmd)
-- [ ] Skills system (Phase 3)
-- [ ] Scheduler (Phase 4)
-- [ ] Ticket tracker (Phase 8)
-
-## Key Features
-
-### Memory System (QMD)
-
-Squire uses QMD for intelligent memory storage and retrieval:
-- **Local embeddings** via node-llama-cpp (fully private, no API calls)
-- **Hybrid search** combining vector similarity + BM25 full-text search
-- **LLM reranking** for improved relevance
-- **Built-in MCP server** for direct AI tool access
+- [x] Core package with SDK clients
+- [x] Discord bot (DM, guild, forum)
+- [x] Slash commands
+- [x] AskUserQuestion UI
+- [x] Memory system (QMD)
+- [x] Skills system
+- [x] Scheduler
+- [x] Plugin system
+- [x] Message queuing
