@@ -117,6 +117,7 @@ class DiscordCommunicator {
   private client: Client;
   private channelMap = new Map<string, TextChannel | DMChannel | ThreadChannel>(); // workspaceId -> channel
   private workspaceManager: WorkspaceManager | null = null;
+  private typingIntervals = new Map<string, NodeJS.Timeout>(); // workspaceId -> interval
 
   constructor(client: Client) {
     this.client = client;
@@ -153,6 +154,42 @@ class DiscordCommunicator {
    */
   registerChannel(workspaceId: string, channel: TextChannel | DMChannel | ThreadChannel): void {
     this.channelMap.set(workspaceId, channel);
+  }
+
+  /**
+   * Start typing indicator for a workspace (shows "X is typing...")
+   * Discord typing indicator lasts 10 seconds, so we repeat every 8 seconds
+   */
+  startTyping(workspaceId: string): void {
+    const channel = this.channelMap.get(workspaceId);
+    if (!channel || !('sendTyping' in channel)) return;
+
+    // Don't start if already typing
+    if (this.typingIntervals.has(workspaceId)) return;
+
+    // Send initial typing
+    (channel as TextChannel | DMChannel | ThreadChannel).sendTyping().catch(() => {});
+
+    // Repeat every 8 seconds (Discord typing lasts 10s)
+    const interval = setInterval(() => {
+      const ch = this.channelMap.get(workspaceId);
+      if (ch && 'sendTyping' in ch) {
+        (ch as TextChannel | DMChannel | ThreadChannel).sendTyping().catch(() => {});
+      }
+    }, 8000);
+
+    this.typingIntervals.set(workspaceId, interval);
+  }
+
+  /**
+   * Stop typing indicator for a workspace
+   */
+  stopTyping(workspaceId: string): void {
+    const interval = this.typingIntervals.get(workspaceId);
+    if (interval) {
+      clearInterval(interval);
+      this.typingIntervals.delete(workspaceId);
+    }
   }
 
   /**
@@ -348,10 +385,23 @@ async function main(): Promise<void> {
   // Handle status updates (typing indicator, activity)
   squire.on('status', (event: any) => {
     const data = event.data;
-    console.log(`[Squire] Status: ${data.activity}`);
-
-    // Update Discord presence based on activity
     const activity = data.activity as string;
+    const workspaceId = data.workspaceId as string | undefined;
+
+    console.log(`[Squire] Status: ${activity} (workspace: ${workspaceId})`);
+
+    // Update typing indicator for the active workspace
+    if (workspaceId) {
+      if (activity === 'thinking' || activity === 'working') {
+        // Start typing indicator when processing
+        communicator.startTyping(workspaceId);
+      } else if (activity === 'ready' || activity === 'error') {
+        // Stop typing when done or errored
+        communicator.stopTyping(workspaceId);
+      }
+    }
+
+    // Update global Discord presence (shows in member list)
     let presenceText = 'for tasks';
     let discordStatus: 'online' | 'idle' | 'dnd' = 'online';
 

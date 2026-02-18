@@ -776,6 +776,7 @@ export class Squire extends EventEmitter {
     this.emitEvent('status', {
       activity,
       timestamp: this.lastHeartbeat.toISOString(),
+      workspaceId: this.activeWorkspaceId,
     });
   }
 
