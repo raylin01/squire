@@ -50,3 +50,4 @@ coverage/
 *.db-wal
 *.sqlite
 *.sqlite3
+bun.lock
