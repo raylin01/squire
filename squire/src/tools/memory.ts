@@ -464,24 +464,30 @@ WHEN TO USE:
 );
 
 /**
- * Reflect on memory (QMD consolidation)
+ * Get intelligent context (core memory + recent logs)
+ * This is what gets injected into AI prompts
  */
 defineTool(
-  'memory_reflect',
-  `Trigger memory consolidation and organization.
+  'memory_context',
+  `Get intelligent memory context for AI prompts.
+
+Returns:
+- Core memory overview (preferences, facts, decisions)
+- Yesterday's activity log
+- Today's activity log
+- Active projects
 
 WHEN TO USE:
-- End of a significant session
-- Periodically to optimize memory
-- Before important searches`,
+- Starting a new session
+- Need context about user's preferences and recent work`,
   {},
   [],
   async () => {
     const manager = getManager();
-    await manager.reflect();
+    const context = await manager.getContext();
     return JSON.stringify({
       success: true,
-      message: 'Memory reflection completed',
+      context,
     }, null, 2);
   }
 );

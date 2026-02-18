@@ -27,7 +27,8 @@ import type {
   SDKProvider,
 } from './types.js';
 import { resolveConfig, ensureSquireDir } from './config.js';
-import { MemoryManager, createMemoryManager, HybridMemoryManager, createHybridMemoryManager } from './memory/index.js';
+import { HybridMemoryManager, createHybridMemoryManager } from './memory/index.js';
+import type { MemoryAddOptions, CoreMemoryType } from './memory/types.js';
 import { SkillManager, createSkillManager } from './skills/index.js';
 import { Scheduler, createScheduler } from './scheduler/index.js';
 import { TicketManager, createTicketManager } from './tickets/index.js';
@@ -46,7 +47,7 @@ export class Squire extends EventEmitter {
   private running: boolean = false;
 
   // Subsystems
-  private memoryManager: MemoryManager | HybridMemoryManager | null = null;
+  private memoryManager: HybridMemoryManager | null = null;
   private skillManager: SkillManager | null = null;
   private scheduler: Scheduler | null = null;
   private ticketManager: TicketManager | null = null;
@@ -416,10 +417,13 @@ export class Squire extends EventEmitter {
     }
 
     const entry = await this.memoryManager.add(content, {
+      type: options?.type as CoreMemoryType | undefined,
       source: options?.source,
       workspaceId: options?.workspaceId,
-      metadata: options?.metadata,
-    });
+      tags: options?.tags,
+      confidence: options?.confidence,
+      evidence: options?.evidence,
+    } as MemoryAddOptions);
 
     console.log(`[Squire] Remembered: ${content.slice(0, 50)}...`);
     this.emitEvent('memory_added', { entry });
@@ -579,7 +583,7 @@ export class Squire extends EventEmitter {
         const relevantMemories = await this.memoryManager.search(content, { limit: 3 });
         if (relevantMemories.length > 0) {
           const memoryContext = relevantMemories
-            .map(m => `• ${m.entry.content}`)
+            .map((m: { entry: { content: string } }) => `• ${m.entry.content}`)
             .join('\n');
           contextContent = `[Relevant memories]\n${memoryContext}\n\n${contextContent}`;
         }

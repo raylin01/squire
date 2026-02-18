@@ -481,10 +481,12 @@ export interface CreateWorkspaceOptions {
 }
 
 export interface RememberOptions {
+  type?: string;              // Memory type: preference, fact, decision, pattern, skill, project
   source?: MemorySource;
   workspaceId?: string;
-  metadata?: Record<string, unknown>;
-  expiresAt?: string;
+  tags?: string[];
+  confidence?: number;        // 0-1, how confident
+  evidence?: string;          // Why we believe this
 }
 
 export interface ScheduleTaskOptions {

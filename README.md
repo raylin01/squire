@@ -11,7 +11,7 @@ squire/
 │       ├── squire.ts    # Main Squire class
 │       ├── types.ts     # Type definitions
 │       ├── sdk/         # AI SDK clients (Claude, Gemini, Codex)
-│       ├── memory/      # Memory system (QMD wrapper)
+│       ├── memory/      # Memory system (markdown files)
 │       ├── skills/      # Skills system
 │       ├── scheduler/   # Task scheduling
 │       └── tickets/     # Ticket tracking
@@ -30,30 +30,33 @@ squire/
 bun install
 ```
 
-### 2. Install QMD (Memory Backend) - Optional
+### 2. Install QMD (Optional - for semantic search)
 
-QMD provides persistent memory with local embeddings. Without it, Squire works but won't remember past conversations.
+QMD is an optional MCP server that provides semantic search over your memory files. Without it, Squire still provides intelligent context (core memory + recent activity logs).
 
+**Install QMD:**
 ```bash
 bun install -g @tobilu/qmd
-```
-
-Or with npm:
-```bash
+# or
 npm install -g @tobilu/qmd
 ```
 
-**Setup collections** (required for QMD to index your content):
+**Add Squire memory to QMD:**
 ```bash
-# Add collections for your notes/docs
-qmd collection add ~/notes --name notes
-qmd collection add ~/Documents --name docs
+# Add the squire memory directory
+qmd collection add ~/.squire/memory --name squire
 
 # Generate embeddings for semantic search
 qmd embed
 ```
 
-QMD runs as an MCP server. Squire will connect to it automatically when the memory system is initialized.
+**How it works:**
+- Squire manages memory as markdown files in `~/.squire/memory/`
+  - `MEMORY.md` - Core memories (preferences, facts, decisions)
+  - `daily/YYYY-MM-DD.md` - Daily activity logs
+- QMD runs as a separate MCP server
+- The AI uses QMD's MCP tools (`qmd_search`, `qmd_vector_search`) directly when available
+- Without QMD, Squire provides local keyword search + intelligent context injection
 
 ### 3. Build
 
@@ -144,11 +147,33 @@ Plugins in `~/.squirebot/plugins/` or `squire-bot/plugins/`:
 **Bundled plugins:**
 - `forum-handler` - Watches forum channels
 
-### Memory System (QMD) - Optional
-- Local embeddings (fully private)
-- Hybrid search (vector + BM25)
-- Automatic context injection
-- **Without QMD**: Squire still works, just without persistent memory
+### Memory System
+
+Squire has a built-in memory system that manages markdown files:
+
+**Core Memory** (`~/.squire/memory/MEMORY.md`):
+- Preferences - things you like/dislike
+- Facts - important information about you
+- Decisions - architectural choices made
+- Patterns - recurring behaviors
+- Skills - your expertise areas
+- Projects - knowledge about your projects
+
+**Daily Logs** (`~/.squire/memory/daily/YYYY-MM-DD.md`):
+- Commits made
+- Tasks started/completed
+- Learnings captured
+- Notes and observations
+
+**Intelligent Context** (always available):
+- Core memory overview injected into AI prompts
+- Yesterday's + today's activity logs
+- Active projects identified
+
+**With QMD** (optional MCP server):
+- Semantic search across all memory files
+- Vector similarity for finding related content
+- AI calls QMD's MCP tools directly (`qmd_search`, `qmd_vector_search`)
 
 ### Message Queuing
 Messages are queued while AI is processing - no lost messages!
@@ -173,9 +198,11 @@ SquireBot is a standalone Discord bot that uses Squire core directly:
 ```
 Discord ←→ squire-bot ←→ Squire Core ←→ AI SDK (Claude/Gemini/Codex)
                               ↓
-                        Memory (QMD)
+                        Memory (markdown files)
                               ↓
                         Skills/Plugins
+
+Optional: QMD MCP Server ←-- AI calls directly for semantic search
 ```
 
 ## Documentation
