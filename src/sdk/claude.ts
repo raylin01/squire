@@ -63,6 +63,10 @@ export class ClaudeSDKClient extends BaseSDKClient {
       });
 
       this.setupEventListeners();
+
+      // Actually start the underlying Claude process
+      await this.client.start();
+
       this.setStatus('idle');
     } catch (error) {
       console.warn('[ClaudeSDK] Could not initialize Claude client:', error);

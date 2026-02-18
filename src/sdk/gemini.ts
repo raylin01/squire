@@ -44,6 +44,10 @@ export class GeminiSDKClient extends BaseSDKClient {
       });
 
       this.setupEventListeners();
+
+      // Actually start the underlying Gemini process
+      await this.client.start();
+
       this.setStatus('idle');
     } catch (error) {
       console.warn('[GeminiSDK] Could not initialize Gemini client:', error);

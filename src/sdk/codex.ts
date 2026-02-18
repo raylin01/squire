@@ -44,6 +44,10 @@ export class CodexSDKClient extends BaseSDKClient {
       });
 
       this.setupEventListeners();
+
+      // Actually start the underlying Codex process
+      await this.client.start();
+
       this.setStatus('idle');
     } catch (error) {
       console.warn('[CodexSDK] Could not initialize Codex client:', error);
