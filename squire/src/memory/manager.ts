@@ -83,7 +83,7 @@ export class MemoryManager {
       content,
       source,
       workspaceId: options?.workspaceId,
-      metadata: options?.metadata,
+      metadata: options?.metadata || {},
       createdAt: timestamp,
     };
 
@@ -141,8 +141,16 @@ export class MemoryManager {
   /**
    * Parse QMD search results into MemorySearchResult format
    */
-  private parseSearchResults(result: { content: unknown }): MemorySearchResult[] {
-    const content = result.content as Array<{ type: string; text: string }>;
+  private parseSearchResults(result: unknown): MemorySearchResult[] {
+    const typedResult = result as { content?: unknown; structuredContent?: { results?: Array<{
+      docid: string;
+      file: string;
+      title: string;
+      score: number;
+      snippet: string;
+    }> } };
+
+    const content = typedResult.content as Array<{ type: string; text: string }> | undefined;
     const textBlock = content?.find(c => c.type === 'text');
     if (!textBlock?.text) return [];
 
@@ -203,13 +211,15 @@ export class MemoryManager {
         }
       });
 
-      const content = result.content as Array<{ type: string; resource?: { text: string } }>;
+      const typedResult = result as { content?: unknown };
+      const content = typedResult.content as Array<{ type: string; resource?: { text: string } }> | undefined;
       const resourceBlock = content?.find(c => c.type === 'resource');
       if (resourceBlock?.resource?.text) {
         return {
           id,
           content: resourceBlock.resource.text,
           source: 'user',
+          metadata: {},
           createdAt: new Date().toISOString(),
         };
       }
