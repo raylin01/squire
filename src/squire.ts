@@ -597,6 +597,16 @@ export class Squire extends EventEmitter {
     lines.push('param1: value1');
     lines.push('```');
     lines.push('');
+    lines.push('For multi-line content, use | (pipe) on its own line:');
+    lines.push('```squire-tool');
+    lines.push('tool_name: squire_communicate');
+    lines.push('type: text');
+    lines.push('content: |');
+    lines.push('  Line 1 of message');
+    lines.push('  Line 2 of message');
+    lines.push('  Line 3 of message');
+    lines.push('```');
+    lines.push('');
 
     // CRITICAL: Emphasize communication tool first
     lines.push('[IMPORTANT: Discord Communication]');
@@ -662,28 +672,9 @@ export class Squire extends EventEmitter {
 
     while ((match = toolBlockRegex.exec(content)) !== null) {
       const block = match[1];
-      const lines = block.trim().split('\n');
-
-      let toolName = '';
-      const params: Record<string, unknown> = {};
-
-      for (const line of lines) {
-        const colonIdx = line.indexOf(':');
-        if (colonIdx > 0) {
-          const key = line.slice(0, colonIdx).trim();
-          const value = line.slice(colonIdx + 1).trim();
-          if (key === 'tool_name') {
-            toolName = value;
-          } else {
-            // Try to parse as JSON, fall back to string
-            try {
-              params[key] = JSON.parse(value);
-            } catch {
-              params[key] = value;
-            }
-          }
-        }
-      }
+      const params = this.parseToolBlock(block);
+      const toolName = params.tool_name as string || '';
+      delete params.tool_name;
 
       if (toolName && toolRegistry.has(toolName)) {
         try {
@@ -698,6 +689,78 @@ export class Squire extends EventEmitter {
     }
 
     return result.trim();
+  }
+
+  /**
+   * Parse a tool block into parameters
+   * Handles multi-line values using YAML-style | block scalars
+   */
+  private parseToolBlock(block: string): Record<string, unknown> {
+    const params: Record<string, unknown> = {};
+    const lines = block.trim().split('\n');
+    let currentKey: string | null = null;
+    let currentValue: string[] = [];
+    let isBlockScalar = false;
+
+    const saveCurrentParam = () => {
+      if (currentKey) {
+        let value: string;
+        if (isBlockScalar && currentValue.length > 0) {
+          // Join block scalar lines, preserving newlines
+          value = currentValue.join('\n');
+        } else if (currentValue.length === 1) {
+          value = currentValue[0];
+        } else {
+          value = currentValue.join('\n');
+        }
+        // Try to parse as JSON, fall back to string
+        try {
+          params[currentKey] = JSON.parse(value);
+        } catch {
+          params[currentKey] = value;
+        }
+      }
+      currentKey = null;
+      currentValue = [];
+      isBlockScalar = false;
+    };
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const colonIdx = line.indexOf(':');
+
+      // Check if this is a new key-value pair (not indented, has colon)
+      if (colonIdx > 0 && !line.slice(0, colonIdx).includes(' ') && !line.startsWith(' ') && !line.startsWith('\t')) {
+        // Save previous param
+        saveCurrentParam();
+
+        currentKey = line.slice(0, colonIdx).trim();
+        const valuePart = line.slice(colonIdx + 1).trim();
+
+        // Check if this is a block scalar (value is just |)
+        if (valuePart === '|') {
+          isBlockScalar = true;
+          currentValue = [];
+        } else if (valuePart) {
+          currentValue = [valuePart];
+        } else {
+          currentValue = [];
+        }
+      } else if (currentKey && (line.startsWith(' ') || line.startsWith('\t'))) {
+        // This is a continuation line (indented)
+        currentValue.push(line.trim());
+      } else if (currentKey && line.trim() === '') {
+        // Empty line in block scalar
+        if (isBlockScalar) {
+          currentValue.push('');
+        }
+      }
+    }
+
+    // Save last param
+    saveCurrentParam();
+
+    return params;
   }
 
   /**
