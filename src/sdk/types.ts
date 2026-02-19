@@ -107,6 +107,8 @@ export interface MetadataEvent {
   tokens?: number;
   model?: string;
   permissionMode?: string;
+  /** CLI session ID for resuming conversations */
+  sessionId?: string;
 }
 
 // ============================================================================

@@ -105,6 +105,7 @@ export interface SDKConfig {
   provider: SDKProvider;
   model?: string;
   cliPath?: string;
+  resumeSessionId?: string;
 }
 
 // ============================================================================
@@ -132,7 +133,12 @@ export interface Workspace {
 }
 
 export interface WorkspaceContext {
+  /** Sandbox directory - isolated folder for this workspace */
+  sandboxPath?: string;
+  /** Project directory - where the SDK runs (defaults to sandboxPath) */
   projectPath?: string;
+  /** CLI session ID for resuming conversations (persists context across restarts) */
+  cliSessionId?: string;
   currentTask?: string;
   recentFiles?: string[];
   environment?: Record<string, string>;

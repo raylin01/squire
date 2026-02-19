@@ -11,6 +11,96 @@
  */
 
 // ============================================================================
+// Safe Patterns - Always auto-approved
+// ============================================================================
+
+/**
+ * Commands that are always safe and auto-approved.
+ * These patterns are checked first - if matched, no approval needed.
+ */
+const SAFE_PATTERNS: Array<RegExp> = [
+  // Python execution (inline scripts)
+  /^python3?\s+-c\s+/,
+  /^python3?\s+-m\s+/,
+  /^python3?\s+[\w\/.-]+\.py$/,
+
+  // Package managers (install only, not remove)
+  /^npm\s+(install|i|add|update|run|test|build|dev)$/,
+  /^npm\s+install\s+/,
+  /^npm\s+run\s+/,
+  /^npm\s+test/,
+  /^pip\s+install/,
+  /^pip3?\s+install/,
+  /^pip3?\s+show/,
+  /^pip3?\s+list/,
+  /^bun\s+(install|add|run|test|build|dev)/,
+
+  // File reading/viewing
+  /^cat\s+/,
+  /^head\s+/,
+  /^tail\s+/,
+  /^less\s+/,
+  /^more\s+/,
+  /^wc\s+/,
+  /^file\s+/,
+  /^ls\b/,
+  /^find\s+/,
+  /^grep\s+/,
+  /^rg\s+/,
+  /^ag\s+/,
+
+  // Git safe operations
+  /^git\s+status/,
+  /^git\s+log/,
+  /^git\s+diff/,
+  /^git\s+show/,
+  /^git\s+branch/,
+  /^git\s+remote/,
+  /^git\s+fetch/,
+  /^git\s+pull(?!\s+--rebase)/,
+  /^git\s+clone/,
+
+  // Node/bun execution
+  /^node\s+/,
+  /^bun\s+/,
+  /^npx\s+/,
+  /^tsx\s+/,
+  /^ts-node\s+/,
+
+  // Development tools
+  /^make\s+/,
+  /^cargo\s+(build|run|test|check|clippy)/,
+  /^go\s+(build|run|test|fmt|vet)/,
+  /^rustc\s+/,
+
+  // System info
+  /^which\s+/,
+  /^whereis\s+/,
+  /^type\s+/,
+  /^echo\s+/,
+  /^printf\s+/,
+  /^env\b/,
+  /^printenv/,
+  /^uname/,
+  /^sw_vers/,
+  /^date\b/,
+  /^uptime/,
+
+  // Safe curl (info only)
+  /^curl\s+-I\s+/,
+  /^curl\s+-s\s+/,
+  /^curl\s+-L\s+/,
+
+  // Misc safe commands
+  /^mkdir\s+/,
+  /^touch\s+/,
+  /^cp\s+/,
+  /^mv\s+/,
+  /^chmod\s+/,
+  /^ln\s+-s/,
+];
+
+// ============================================================================
 // Truly Dangerous Operations - ALWAYS require approval
 // ============================================================================
 
@@ -90,6 +180,13 @@ export function checkBashPermission(
   // Permissive mode - approve everything
   if (mode === 'permissive') {
     return null;
+  }
+
+  // Check safe patterns first - auto-approve if matched
+  for (const pattern of SAFE_PATTERNS) {
+    if (pattern.test(command)) {
+      return null;  // Auto-approve safe commands
+    }
   }
 
   // Check always dangerous patterns
@@ -188,4 +285,88 @@ export function getDangerousReason(command: string): string | null {
     }
   }
   return null;
+}
+
+// ============================================================================
+// SDK Integration Functions
+// ============================================================================
+
+/**
+ * Tools that are always safe to auto-approve (read-only operations).
+ */
+export const SAFE_TOOLS = new Set([
+  'Read',
+  'Glob',
+  'Grep',
+  'LSP',
+  'DirectoryTree',
+  'NotebookRead',
+]);
+
+/**
+ * Tools that are always dangerous and require approval.
+ */
+export const DANGEROUS_TOOLS = new Set([
+  'Edit',
+  'Write',
+  'MultiEdit',
+  'NotebookEdit',
+  'Bash',
+  'Task',
+  'Skill',
+  'MCP',
+  'ExitPlanMode',
+]);
+
+/**
+ * Check if a tool with given input should be auto-approved in autoSafe mode.
+ * This is the key function for SDK permission handling.
+ *
+ * @param toolName The name of the tool
+ * @param input The tool input (for Bash, contains the command)
+ * @returns true if the tool should be auto-approved
+ */
+export function shouldAutoApproveInSafeMode(
+  toolName: string,
+  input: Record<string, unknown> | undefined
+): boolean {
+  // AskUserQuestion should NEVER be auto-approved - it requires actual user input
+  if (toolName === 'AskUserQuestion') {
+    return false;
+  }
+
+  // Safe tools (read-only) are always auto-approved
+  if (SAFE_TOOLS.has(toolName)) {
+    return true;
+  }
+
+  // For Bash, check the command against our patterns
+  if (toolName === 'Bash') {
+    const command = (input?.command as string) || '';
+
+    // First check for dangerous patterns - these take precedence
+    for (const { pattern } of ALWAYS_DANGEROUS_PATTERNS) {
+      if (pattern.test(command)) {
+        return false;
+      }
+    }
+    for (const { pattern } of STRICT_ONLY_DANGEROUS_PATTERNS) {
+      if (pattern.test(command)) {
+        return false;
+      }
+    }
+
+    // Check for safe patterns
+    for (const pattern of SAFE_PATTERNS) {
+      if (pattern.test(command)) {
+        return true;
+      }
+    }
+
+    // Default to requiring approval for unknown Bash commands
+    return false;
+  }
+
+  // All other tools require approval
+  return false;
 }

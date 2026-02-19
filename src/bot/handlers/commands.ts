@@ -11,13 +11,14 @@ import {
 import type { Client } from 'discord.js';
 import type { Squire } from '../../index.js';
 import {
-  loadConfig,
-  saveConfig,
+  loadConfig as loadSquireConfig,
+  saveConfig as saveSquireConfig,
   getSquireDir,
   PERSONALITY_TEMPLATES,
   getPersonalityTemplateList,
 } from '../../index.js';
 import type { PersonalityTemplateName } from '../../index.js';
+import { loadConfig, saveConfig } from '../config.js';
 import type { SquireBotConfig } from '../config.js';
 
 const COMMAND_PREFIX = '!';
@@ -53,15 +54,16 @@ const COMMANDS: Record<string, { handler: CommandHandler; help: string }> = {
         return 'Please provide a name. Usage: !name <name>';
       }
 
-      // Update squire config
-      const config = ctx.squire.getConfig();
-      config.name = newName;
+      // Update squire runtime config
+      const squireConfig = ctx.squire.getConfig();
+      squireConfig.name = newName;
 
       // Persist to file
-      const squireConfig = loadConfig();
-      if (squireConfig) {
-        squireConfig.name = newName;
-        saveConfig(squireConfig);
+      const botConfig = loadConfig();
+      if (botConfig) {
+        botConfig.name = newName;
+        saveConfig(botConfig);
+        console.log(`[Commands] Saved name "${newName}" to config`);
       }
 
       return `My name is now **${newName}**! Nice to meet you.`;
@@ -114,10 +116,10 @@ const COMMANDS: Record<string, { handler: CommandHandler; help: string }> = {
       config.personality.default = { ...template };
 
       // Persist
-      const squireConfig = loadConfig();
+      const squireConfig = loadSquireConfig();
       if (squireConfig) {
         squireConfig.personality.default = { ...template };
-        saveConfig(squireConfig);
+        saveSquireConfig(squireConfig);
       }
 
       // Update personality manager
@@ -326,13 +328,24 @@ const COMMANDS: Record<string, { handler: CommandHandler; help: string }> = {
       const projectPath = args.join(' ').trim();
 
       if (!projectPath) {
-        // Show current project path
+        // Show current paths
         const workspace = ctx.squire.getWorkspace(ctx.workspaceId);
-        const currentPath = workspace?.context?.projectPath;
-        if (currentPath) {
-          return `Current project directory: \`${currentPath}\``;
+        const currentProject = workspace?.context?.projectPath;
+        const sandboxPath = workspace?.context?.sandboxPath;
+
+        const lines = ['**Workspace Paths:**'];
+        if (currentProject) {
+          lines.push(`- Project: \`${currentProject}\``);
         }
-        return 'No project directory set. Use `!project /path/to/repo` to set one.';
+        if (sandboxPath) {
+          lines.push(`- Sandbox: \`${sandboxPath}\``);
+        }
+        if (!currentProject && !sandboxPath) {
+          lines.push('No paths set. Using process directory.');
+        }
+        lines.push('');
+        lines.push('Use `!project /path/to/repo` to change project directory.');
+        return lines.join('\n');
       }
 
       // Validate path exists
@@ -346,6 +359,8 @@ const COMMANDS: Record<string, { handler: CommandHandler; help: string }> = {
       if (workspace) {
         workspace.context = workspace.context || {};
         workspace.context.projectPath = projectPath;
+        // Save the change
+        await ctx.squire.saveWorkspaces();
       }
 
       return `Project directory set to: \`${projectPath}\``;
@@ -357,6 +372,166 @@ const COMMANDS: Record<string, { handler: CommandHandler; help: string }> = {
     handler: async (ctx, args) => {
       // Just delegate to project command
       return COMMANDS.project.handler(ctx, args);
+    },
+  },
+
+  sandbox: {
+    help: 'Reset project path to the workspace sandbox directory',
+    handler: async (ctx) => {
+      const workspace = ctx.squire.getWorkspace(ctx.workspaceId);
+      if (!workspace) {
+        return 'Workspace not found';
+      }
+
+      const sandboxPath = workspace.context?.sandboxPath;
+      if (!sandboxPath) {
+        return 'No sandbox directory set for this workspace.';
+      }
+
+      // Update workspace context to use sandbox
+      workspace.context = {
+        ...workspace.context,
+        projectPath: sandboxPath,
+      };
+      await ctx.squire.saveWorkspaces();
+
+      return `Project path reset to sandbox: \`${sandboxPath}\`\nRestart the bot or use \`!regenerate\` to apply the change.`;
+    },
+  },
+
+  defaultproject: {
+    help: 'Set default project directory for all new workspaces (e.g., !defaultproject /Users/ray/Documents/DisCode)',
+    handler: async (ctx, args) => {
+      const projectPath = args.join(' ').trim();
+
+      // Load current config
+      const config = loadConfig();
+      if (!config) {
+        return 'Error: Could not load configuration';
+      }
+
+      if (!projectPath) {
+        // Show current default
+        if (config.defaultProjectPath) {
+          return `Default project directory: \`${config.defaultProjectPath}\``;
+        }
+        return 'No default project directory set. Use `!defaultproject /path/to/repo` to set one.';
+      }
+
+      // Validate path exists
+      const fs = await import('fs');
+      if (!fs.existsSync(projectPath)) {
+        return `Path does not exist: \`${projectPath}\``;
+      }
+
+      // Update and save config
+      config.defaultProjectPath = projectPath;
+      saveConfig(config);
+
+      return `Default project directory set to: \`${projectPath}\`\nNew workspaces will start in this directory.`;
+    },
+  },
+
+  regenerate: {
+    help: 'Reset workspace - creates fresh sandbox (only deletes if in .squirebot/workspaces)',
+    handler: async (ctx, args) => {
+      const workspace = ctx.squire.getWorkspace(ctx.workspaceId);
+      if (!workspace) {
+        return 'Workspace not found';
+      }
+
+      const fs = await import('fs');
+      const path = await import('path');
+      const os = await import('os');
+      const { getWorkspaceSandboxDir, getSquireBotDir } = await import('../config.js');
+
+      const squirebotDir = getSquireBotDir();
+      const workspacesDir = path.join(squirebotDir, 'workspaces');
+      const currentSandbox = workspace.context?.sandboxPath;
+      const currentProject = workspace.context?.projectPath;
+
+      // Check if current paths are within the safe sandbox directory
+      const isSandboxSafe = currentSandbox && currentSandbox.startsWith(workspacesDir);
+      const isProjectSafe = currentProject && currentProject.startsWith(workspacesDir);
+
+      // Always create a new sandbox directory
+      const newSandboxDir = getWorkspaceSandboxDir(ctx.workspaceId + '-new');
+
+      // Delete old sandbox only if it's in the safe directory
+      if (isSandboxSafe && currentSandbox && fs.existsSync(currentSandbox)) {
+        try {
+          fs.rmSync(currentSandbox, { recursive: true, force: true });
+          console.log(`[Commands] Deleted old sandbox: ${currentSandbox}`);
+        } catch (error) {
+          console.warn(`[Commands] Could not delete old sandbox:`, error);
+        }
+      }
+
+      // Rename new sandbox to match workspace ID
+      const shortId = ctx.workspaceId.slice(0, 8);
+      const finalSandboxDir = path.join(workspacesDir, shortId);
+      if (newSandboxDir !== finalSandboxDir && fs.existsSync(newSandboxDir)) {
+        // Remove old final dir if exists
+        if (fs.existsSync(finalSandboxDir)) {
+          fs.rmSync(finalSandboxDir, { recursive: true, force: true });
+        }
+        fs.renameSync(newSandboxDir, finalSandboxDir);
+      }
+
+      // Update workspace context - clear CLI session ID for fresh conversation
+      const oldSessionId = workspace.context?.cliSessionId;
+      workspace.context = {
+        ...workspace.context,
+        sandboxPath: finalSandboxDir,
+        // Reset projectPath to sandbox unless user had a custom project
+        projectPath: isProjectSafe ? finalSandboxDir : currentProject,
+        // Clear CLI session ID to start fresh conversation
+        cliSessionId: undefined,
+      };
+
+      await ctx.squire.saveWorkspaces();
+
+      const lines = ['**Workspace Regenerated**', ''];
+      lines.push(`- New sandbox: \`${finalSandboxDir}\``);
+      if (oldSessionId) {
+        lines.push(`- Conversation reset (old session cleared)`);
+      }
+      if (!isSandboxSafe && currentSandbox) {
+        lines.push(`- Old sandbox preserved (not in .squirebot): \`${currentSandbox}\``);
+      }
+      if (!isProjectSafe && currentProject) {
+        lines.push(`- Project path unchanged: \`${currentProject}\``);
+      }
+      lines.push('');
+      lines.push('The workspace now has a clean slate.');
+
+      return lines.join('\n');
+    },
+  },
+
+  approve: {
+    help: 'Approve a pending tool/command request',
+    handler: async (ctx) => {
+      const pendingId = ctx.squire.getFirstPendingApprovalId(ctx.workspaceId);
+      if (!pendingId) {
+        return 'No pending approval requests.';
+      }
+
+      await ctx.squire.respondToApproval(pendingId, true, ctx.workspaceId);
+      return 'Approved.';
+    },
+  },
+
+  deny: {
+    help: 'Deny a pending tool/command request',
+    handler: async (ctx) => {
+      const pendingId = ctx.squire.getFirstPendingApprovalId(ctx.workspaceId);
+      if (!pendingId) {
+        return 'No pending approval requests.';
+      }
+
+      await ctx.squire.respondToApproval(pendingId, false, ctx.workspaceId);
+      return 'Denied.';
     },
   },
 };

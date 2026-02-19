@@ -244,6 +244,22 @@ export abstract class BaseSDKClient extends EventEmitter<SDKClientEventMap> {
     // Override in subclass if needed
   }
 
+  /**
+   * Update the working directory and restart the SDK if needed.
+   * Returns true if the SDK was restarted, false if cwd was already correct.
+   */
+  async setCwd(newCwd: string): Promise<boolean> {
+    if (this.config.cwd === newCwd) {
+      return false;
+    }
+
+    console.log(`[SDK] Changing working directory from ${this.config.cwd} to ${newCwd}`);
+    this.config.cwd = newCwd;
+
+    // Subclasses should override this to restart their process
+    return true;
+  }
+
   async sendMessageWithImages(
     text: string,
     images: Array<{ data: string; mediaType: string }>

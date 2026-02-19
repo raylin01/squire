@@ -34,9 +34,9 @@ import { SkillManager, createSkillManager } from './skills/index.js';
 import { Scheduler, createScheduler } from './scheduler/index.js';
 import { TicketManager, createTicketManager } from './tickets/index.js';
 import { PersonalityManager, createPersonalityManager } from './personality/index.js';
-import { createSDKClient, BaseSDKClient } from './sdk/index.js';
 import { toolRegistry, setCommunicationHandler, communicate, setSelfManageState, setMemoryManager as setToolMemoryManager, setScheduler as setToolScheduler, setTicketManager as setToolTicketManager, setSquireInstance } from './tools/index.js';
 import { checkBashPermission, checkToolPermission } from './permissions/index.js';
+import { WorkspaceSession } from './workspace-session.js';
 
 /**
  * Squire - The main personal AI assistant class
@@ -44,6 +44,7 @@ import { checkBashPermission, checkToolPermission } from './permissions/index.js
 export class Squire extends EventEmitter {
   private config: SquireConfig;
   private workspaces: Map<string, Workspace> = new Map();
+  private workspaceSessions: Map<string, WorkspaceSession> = new Map();
   private activeWorkspaceId: string | null = null;
   private running: boolean = false;
 
@@ -53,9 +54,6 @@ export class Squire extends EventEmitter {
   private scheduler: Scheduler | null = null;
   private ticketManager: TicketManager | null = null;
   private personalityManager: PersonalityManager | null = null;
-
-  // SDK Client
-  private sdkClient: BaseSDKClient | null = null;
 
   // Heartbeat/activity tracking
   private lastHeartbeat: Date = new Date();
@@ -75,11 +73,13 @@ export class Squire extends EventEmitter {
     // Communication handler - connects squire_communicate to actual output
     setCommunicationHandler(async (options) => {
       this.emitEvent('communication', {
+        workspaceId: this.activeWorkspaceId,
         type: options.type,
         content: options.content,
         title: options.title,
         color: options.color,
         ping: options.ping,
+        filePath: options.filePath,
       });
       return `Message sent: ${options.type}`;
     });
@@ -124,8 +124,10 @@ export class Squire extends EventEmitter {
     // Load existing workspaces from storage
     await this.loadWorkspaces();
 
-    // Initialize SDK client
-    await this.initializeSDK();
+    // Create workspace sessions for loaded workspaces (SDK is lazy-initialized per workspace)
+    for (const [workspaceId, workspace] of this.workspaces) {
+      this.createWorkspaceSession(workspace);
+    }
 
     // Initialize memory system (use hybrid memory manager)
     if (this.config.memory.enabled) {
@@ -198,80 +200,91 @@ export class Squire extends EventEmitter {
   }
 
   /**
-   * Initialize the SDK client
+   * Create a workspace session with its own SDK client
    */
-  private async initializeSDK(): Promise<void> {
-    try {
-      this.sdkClient = createSDKClient({
-        provider: this.config.sdk.provider,
-        model: this.config.sdk.model || this.config.model,
-        cwd: process.cwd(),
-        permissionMode: this.config.permissions.mode,
-        cliPath: this.config.sdk.cliPath,
+  private createWorkspaceSession(workspace: Workspace): WorkspaceSession {
+    const session = new WorkspaceSession(workspace, {
+      provider: this.config.sdk.provider,
+      permissionMode: this.config.permissions.mode,
+      model: this.config.sdk.model || this.config.model,
+      cliPath: this.config.sdk.cliPath,
+    });
+
+    // Set up event forwarding from session to Squire events
+    session.on('output', async (output) => {
+      this.lastHeartbeat = new Date();
+
+      // Process tool calls from output (when complete)
+      let processedContent = output.content;
+      if (output.isComplete && output.outputType === 'stdout') {
+        processedContent = await this.processToolCalls(output.content, output.workspaceId);
+      }
+
+      // Emit output event for Discord routing
+      this.emitEvent('output', {
+        workspaceId: output.workspaceId,
+        content: processedContent,
+        outputType: output.outputType || 'stdout',
+        isComplete: output.isComplete || false,
       });
+    });
 
-      // Set up SDK event handlers
-      this.sdkClient.on('output', (output) => {
-        this.lastHeartbeat = new Date();
+    session.on('tool_use', async (event) => {
+      this.updateActivity(`using ${event.toolName}`);
+      await this.handleToolUse(event, session);
+    });
 
-        // Emit output event for Discord routing
-        // Note: output.outputType can be 'stdout' or 'thinking'
-        if (this.activeWorkspaceId) {
-          this.emitEvent('output', {
-            workspaceId: this.activeWorkspaceId,
-            content: output.content,
-            outputType: output.outputType || 'stdout',
-            isComplete: output.isComplete || false,
-          });
-        }
-      });
+    session.on('approval', async (event) => {
+      this.updateActivity('awaiting approval');
+      await this.handleApproval(event, session);
+    });
 
-      this.sdkClient.on('tool_use', async (event) => {
-        this.updateActivity(`using ${event.toolName}`);
-        await this.handleToolUse(event);
-      });
+    session.on('complete', (data) => {
+      this.updateActivity('ready');
+      this.emitEvent('complete', { workspaceId: data.workspaceId });
+    });
 
-      this.sdkClient.on('approval', async (event) => {
-        this.updateActivity('awaiting approval');
-        await this.handleApproval(event);
-      });
+    session.on('error', (error) => {
+      console.error(`[Squire] SDK error (${error.workspaceId?.slice(0, 8)}...):`, error);
+      this.updateActivity('error');
+    });
 
-      this.sdkClient.on('complete', () => {
-        this.updateActivity('ready');
-        // Emit complete event with workspaceId
-        if (this.activeWorkspaceId) {
-          this.emitEvent('complete', {
-            workspaceId: this.activeWorkspaceId,
-          });
-        }
-      });
+    session.on('status', (data) => {
+      console.log(`[Squire] Session status (${data.workspaceId?.slice(0, 8)}...): ${data.status}`);
+    });
 
-      this.sdkClient.on('error', (error) => {
-        console.error('[Squire] SDK error:', error);
-        this.updateActivity('error');
-      });
+    // Save CLI session ID for persistence
+    session.on('session_id', async (data) => {
+      console.log(`[Squire] Session ID captured (${data.workspaceId.slice(0, 8)}...): ${data.cliSessionId.slice(0, 8)}...`);
+      // Save workspaces to persist the CLI session ID
+      await this.saveWorkspaces();
+    });
 
-      // Start the SDK client (spawns the underlying process)
-      await this.sdkClient.start();
-
-      console.log(`[Squire] SDK initialized: ${this.config.sdk.provider}`);
-    } catch (error) {
-      console.error('[Squire] Failed to initialize SDK:', error);
-      throw error;
-    }
+    this.workspaceSessions.set(workspace.workspaceId, session);
+    console.log(`[Squire] Created session for workspace ${workspace.workspaceId.slice(0, 8)}...`);
+    return session;
   }
 
   /**
-   * Switch to a different SDK provider
+   * Get or create a workspace session
+   */
+  private getOrCreateSession(workspaceId: string): WorkspaceSession | undefined {
+    let session = this.workspaceSessions.get(workspaceId);
+    if (!session) {
+      const workspace = this.workspaces.get(workspaceId);
+      if (workspace) {
+        session = this.createWorkspaceSession(workspace);
+      }
+    }
+    return session;
+  }
+
+  /**
+   * Switch to a different SDK provider (affects new sessions)
    */
   async switchSDK(provider: SDKProvider): Promise<void> {
-    if (this.sdkClient) {
-      await this.sdkClient.close();
-    }
-
     this.config.sdk.provider = provider;
-    await this.initializeSDK();
-    console.log(`[Squire] Switched to ${provider} SDK`);
+    console.log(`[Squire] SDK provider changed to ${provider} (affects new workspace sessions)`);
   }
 
   /**
@@ -285,10 +298,11 @@ export class Squire extends EventEmitter {
     console.log(`[Squire] Stopping ${this.config.name}...`);
     this.updateActivity('stopping');
 
-    // Close SDK client
-    if (this.sdkClient) {
-      await this.sdkClient.close();
+    // Close all workspace sessions
+    for (const [workspaceId, session] of this.workspaceSessions) {
+      await session.stop();
     }
+    this.workspaceSessions.clear();
 
     // Stop scheduler
     if (this.scheduler) {
@@ -350,6 +364,10 @@ export class Squire extends EventEmitter {
     };
 
     this.workspaces.set(workspace.workspaceId, workspace);
+
+    // Create a session for this workspace (SDK is lazy-initialized)
+    this.createWorkspaceSession(workspace);
+
     this.emitEvent('workspace_created', { workspace });
     await this.saveWorkspaces();
 
@@ -395,6 +413,7 @@ export class Squire extends EventEmitter {
     this.activeWorkspaceId = workspaceId;
     workspace.lastActivityAt = new Date().toISOString();
     this.emitEvent('workspace_activated', { workspaceId });
+    // Note: Each workspace has its own SDK session, no need to change cwd
   }
 
   /**
@@ -563,6 +582,125 @@ export class Squire extends EventEmitter {
   // ==========================================================================
 
   /**
+   * Build tool documentation for the AI to understand available tools
+   */
+  private buildToolContext(): string {
+    const tools = toolRegistry.getAll();
+    if (tools.length === 0) {
+      return '';
+    }
+
+    const lines = ['[Squire Tools - Call by including a tool block in your response]'];
+    lines.push('Format:');
+    lines.push('```squire-tool');
+    lines.push('tool_name: <name>');
+    lines.push('param1: value1');
+    lines.push('```');
+    lines.push('');
+
+    // CRITICAL: Emphasize communication tool first
+    lines.push('[IMPORTANT: Discord Communication]');
+    lines.push('You MUST use squire_communicate to send messages to the user on Discord.');
+    lines.push('Your regular output is NOT automatically sent to Discord.');
+    lines.push('');
+    lines.push('Example - send text:');
+    lines.push('```squire-tool');
+    lines.push('tool_name: squire_communicate');
+    lines.push('type: text');
+    lines.push('content: Your message here');
+    lines.push('```');
+    lines.push('');
+    lines.push('Example - send embed (status updates):');
+    lines.push('```squire-tool');
+    lines.push('tool_name: squire_communicate');
+    lines.push('type: embed');
+    lines.push('title: Task Complete');
+    lines.push('content: Description here');
+    lines.push('color: green');
+    lines.push('```');
+    lines.push('');
+    lines.push('Example - send file:');
+    lines.push('```squire-tool');
+    lines.push('tool_name: squire_communicate');
+    lines.push('type: file');
+    lines.push('filePath: /path/to/file.png');
+    lines.push('content: Optional message with file');
+    lines.push('```');
+    lines.push('');
+    lines.push('Colors: green, red, yellow, blue, orange, purple');
+    lines.push('');
+
+    lines.push('Available tools:');
+
+    for (const tool of tools) {
+      // Get the first paragraph of description (the summary)
+      const descLines = tool.description.split('\n');
+      const summary = descLines[0];
+      const params = Object.keys(tool.inputSchema.properties || {}).join(', ');
+      lines.push(`- ${tool.name}(${params}): ${summary}`);
+    }
+
+    // Add specific guidance for memory tools
+    lines.push('');
+    lines.push('[Memory Guidance]');
+    lines.push('- Proactively record things you learn about the user');
+    lines.push('- Use memory_remember_preference when user states a preference');
+    lines.push('- Use memory_remember_fact when user shares personal info');
+    lines.push('- Use memory_search when user asks about past events');
+
+    return lines.join('\n');
+  }
+
+  /**
+   * Parse and execute tool calls from AI output
+   * Returns the output with tool blocks removed
+   */
+  private async processToolCalls(content: string, workspaceId?: string): Promise<string> {
+    const toolBlockRegex = /```squire-tool\n([\s\S]*?)```/g;
+    let result = content;
+    let match;
+
+    while ((match = toolBlockRegex.exec(content)) !== null) {
+      const block = match[1];
+      const lines = block.trim().split('\n');
+
+      let toolName = '';
+      const params: Record<string, unknown> = {};
+
+      for (const line of lines) {
+        const colonIdx = line.indexOf(':');
+        if (colonIdx > 0) {
+          const key = line.slice(0, colonIdx).trim();
+          const value = line.slice(colonIdx + 1).trim();
+          if (key === 'tool_name') {
+            toolName = value;
+          } else {
+            // Try to parse as JSON, fall back to string
+            try {
+              params[key] = JSON.parse(value);
+            } catch {
+              params[key] = value;
+            }
+          }
+        }
+      }
+
+      if (toolName && toolRegistry.has(toolName)) {
+        try {
+          console.log(`[Squire] Executing tool: ${toolName} (workspace: ${workspaceId?.slice(0, 8)}...)`);
+          await toolRegistry.execute(toolName, params);
+          // Remove the tool block from output
+          result = result.replace(match[0], '');
+        } catch (error) {
+          console.error(`[Squire] Tool execution failed: ${toolName}`, error);
+        }
+      }
+    }
+
+    return result.trim();
+  }
+
+  /**
    * Send a message to a workspace
    */
   async sendMessage(workspaceId: string, content: string): Promise<SquireMessage> {
@@ -571,8 +709,10 @@ export class Squire extends EventEmitter {
       throw new Error(`Workspace not found: ${workspaceId}`);
     }
 
-    if (!this.sdkClient) {
-      throw new Error('SDK client not initialized');
+    // Get or create the workspace session
+    const session = this.getOrCreateSession(workspaceId);
+    if (!session) {
+      throw new Error(`Could not create session for workspace ${workspaceId}`);
     }
 
     // Update workspace activity
@@ -582,6 +722,12 @@ export class Squire extends EventEmitter {
 
     // Build message with compact context
     let contextContent = content;
+
+    // Add tool documentation so AI knows what's available
+    const toolContext = this.buildToolContext();
+    if (toolContext) {
+      contextContent = `${toolContext}\n\n${contextContent}`;
+    }
 
     // Add working directory context if workspace has a project path
     if (workspace.context?.projectPath) {
@@ -618,8 +764,69 @@ export class Squire extends EventEmitter {
       }
     }
 
-    // Send to SDK
-    await this.sdkClient.sendMessage({ role: 'user', content: contextContent });
+    // Send to workspace's SDK session
+    await session.sendMessage({ role: 'user', content: contextContent });
+
+    // Return message (actual response comes via events)
+    const message: SquireMessage = {
+      role: 'assistant',
+      content: '', // Will be filled via events
+      workspaceId,
+      timestamp: new Date().toISOString(),
+    };
+
+    this.emitEvent('message_sent', { message });
+    return message;
+  }
+
+  /**
+   * Send a message with images to a workspace
+   */
+  async sendMessageWithImages(
+    workspaceId: string,
+    content: string,
+    images: Array<{ data: string; mediaType: string }>
+  ): Promise<SquireMessage> {
+    const workspace = this.workspaces.get(workspaceId);
+    if (!workspace) {
+      throw new Error(`Workspace not found: ${workspaceId}`);
+    }
+
+    // Get or create the workspace session
+    const session = this.getOrCreateSession(workspaceId);
+    if (!session) {
+      throw new Error(`Could not create session for workspace ${workspaceId}`);
+    }
+
+    // Update workspace activity
+    workspace.lastActivityAt = new Date().toISOString();
+    this.setActiveWorkspace(workspaceId);
+    this.updateActivity('thinking');
+
+    // Build message with compact context
+    let contextContent = content;
+
+    // Add tool documentation so AI knows what's available
+    const toolContext = this.buildToolContext();
+    if (toolContext) {
+      contextContent = `${toolContext}\n\n${contextContent}`;
+    }
+
+    // Add working directory context if workspace has a project path
+    if (workspace.context?.projectPath) {
+      contextContent = `[Working directory: ${workspace.context.projectPath}]\n\n${contextContent}`;
+    }
+
+    // Add compact personality summary
+    if (this.personalityManager) {
+      const personality = this.personalityManager.getPersonality(workspaceId);
+      const traits = personality.traits;
+      const personalitySummary = `[You are ${this.config.name}. Tone: ${traits.tone}, Verbosity: ${traits.verbosity}, Technicality: ${traits.technicality}]`;
+      contextContent = `${personalitySummary}\n\n${contextContent}`;
+    }
+
+    // Send to workspace's SDK session with images
+    await session.sendMessageWithImages(contextContent, images);
 
     // Return message (actual response comes via events)
     const message: SquireMessage = {
@@ -678,19 +885,17 @@ export class Squire extends EventEmitter {
   /**
    * Handle tool use from SDK
    */
-  private async handleToolUse(event: { toolName: string; toolId: string; input: Record<string, unknown> }): Promise<void> {
-    if (!this.sdkClient) return;
-
+  private async handleToolUse(event: { toolName: string; toolId: string; input: Record<string, unknown>; workspaceId?: string }, session: WorkspaceSession): Promise<void> {
     // Check if this is a built-in Squire tool
     if (toolRegistry.has(event.toolName)) {
       try {
         const result = await toolRegistry.execute(event.toolName, event.input);
-        await this.sdkClient.sendToolResult({
+        await session.sendToolResult({
           toolUseId: event.toolId,
           content: result,
         });
       } catch (error) {
-        await this.sdkClient.sendToolResult({
+        await session.sendToolResult({
           toolUseId: event.toolId,
           content: `Error: ${error instanceof Error ? error.message : String(error)}`,
           isError: true,
@@ -714,14 +919,12 @@ export class Squire extends EventEmitter {
   /**
    * Handle approval request from SDK
    */
-  private async handleApproval(event: { requestId: string; toolName: string; toolInput: Record<string, unknown> }): Promise<void> {
-    if (!this.sdkClient) return;
-
+  private async handleApproval(event: { requestId: string; toolName: string; toolInput: Record<string, unknown>; workspaceId?: string }, session: WorkspaceSession): Promise<void> {
     const permissionReason = this.checkPermissionNeeded(event.toolName, event.toolInput);
 
     if (!permissionReason) {
       // Auto-approve
-      await this.sdkClient.sendApproval(event.requestId, 'allow');
+      await session.sendApproval(event.requestId, 'allow');
       return;
     }
 
@@ -731,7 +934,7 @@ export class Squire extends EventEmitter {
       toolName: event.toolName,
       toolInput: event.toolInput,
       reason: permissionReason,
-      workspaceId: this.activeWorkspaceId,
+      workspaceId: event.workspaceId || this.activeWorkspaceId,
     });
   }
 
@@ -764,9 +967,24 @@ export class Squire extends EventEmitter {
   /**
    * Respond to an approval request
    */
-  async respondToApproval(requestId: string, approved: boolean, updatedInput?: Record<string, unknown>): Promise<void> {
-    if (!this.sdkClient) return;
-    await this.sdkClient.sendApproval(requestId, approved ? 'allow' : 'deny', updatedInput);
+  async respondToApproval(requestId: string, approved: boolean, workspaceId?: string, updatedInput?: Record<string, unknown>): Promise<void> {
+    // Find the session that has this approval pending
+    const targetWorkspaceId = workspaceId || this.activeWorkspaceId;
+    if (!targetWorkspaceId) return;
+
+    const session = this.workspaceSessions.get(targetWorkspaceId);
+    if (!session) return;
+
+    await session.sendApproval(requestId, approved ? 'allow' : 'deny', updatedInput);
+  }
+
+  /**
+   * Get the first pending approval ID for a workspace
+   */
+  getFirstPendingApprovalId(workspaceId: string): string | undefined {
+    const session = this.workspaceSessions.get(workspaceId);
+    if (!session) return undefined;
+    return session.getFirstPendingApprovalId();
   }
 
   // ==========================================================================
@@ -996,7 +1214,7 @@ export class Squire extends EventEmitter {
     }
   }
 
-  private async saveWorkspaces(): Promise<void> {
+  async saveWorkspaces(): Promise<void> {
     const workspacesFile = path.join(this.config.dataDir, 'workspaces.json');
 
     try {

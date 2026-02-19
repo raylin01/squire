@@ -427,7 +427,7 @@ async function submitAnswer(
     },
   };
 
-  await squire.respondToApproval(pending.requestId, true, updatedInput);
+  await squire.respondToApproval(pending.requestId, true, pending.workspaceId, updatedInput);
 }
 
 /**

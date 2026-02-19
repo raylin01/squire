@@ -14,6 +14,7 @@ import {
   ToolUseEvent,
   ApprovalEvent,
 } from './types.js';
+import { shouldAutoApproveInSafeMode, getDangerousReason } from '../permissions/safe-tools.js';
 
 interface ClaudePendingApproval {
   requestId: string;
@@ -82,6 +83,7 @@ export class ClaudeSDKClient extends BaseSDKClient {
       this.emit('metadata', {
         model: msg.model,
         permissionMode: msg.permissionMode,
+        sessionId: this.client?.sessionId,
       });
     });
 
@@ -111,18 +113,47 @@ export class ClaudeSDKClient extends BaseSDKClient {
     this.client.on('control_request', (msg: any) => {
       if (msg.request?.subtype === 'can_use_tool') {
         const approvalId = msg.request_id;
+        const toolName = msg.request.tool_name || 'unknown';
+        const input = msg.request.input || {};
+
+        // Check if auto-approval is enabled (autoSafe or permissive mode)
+        const permissionMode = this.config.permissionMode;
+        const shouldAutoApprove = permissionMode === 'permissive' ||
+          (permissionMode === 'autoSafe' && shouldAutoApproveInSafeMode(toolName, input));
+
+        if (shouldAutoApprove) {
+          // Auto-approve safe operations
+          console.log(`[ClaudeSDK] Auto-approving: ${toolName} (mode: ${permissionMode})`);
+          const responseData = {
+            behavior: 'allow',
+            updatedInput: input,
+            message: 'Auto-approved'
+          };
+          this.client.sendControlResponse(approvalId, responseData).catch((err: Error) => {
+            console.warn('[ClaudeSDK] Error sending auto-approval:', err);
+          });
+          return;
+        }
+
+        // Log why approval is needed
+        if (toolName === 'Bash' && input.command) {
+          const reason = getDangerousReason(input.command as string);
+          console.log(`[ClaudeSDK] Tool ${toolName} requires approval${reason ? `: ${reason}` : ''}`);
+        }
+
+        // Add to pending approvals and emit event
         this.pendingApprovals.add(approvalId, {
           requestId: approvalId,
-          toolName: msg.request.tool_name || 'unknown',
-          input: msg.request.input || {},
+          toolName,
+          input,
           toolUseId: msg.request.tool_use_id || '',
           createdAt: Date.now(),
         });
 
         this.emit('approval', {
           requestId: approvalId,
-          toolName: msg.request.tool_name || 'unknown',
-          toolInput: msg.request.input || {},
+          toolName,
+          toolInput: input,
           context: msg.request.decision_reason,
         } as ApprovalEvent);
 
@@ -131,7 +162,6 @@ export class ClaudeSDKClient extends BaseSDKClient {
     });
 
     this.client.on('result', () => {
-      console.log('[ClaudeSDK] Result event received, flushing output');
       this.setStatus('idle');
       this.outputThrottler.flush(true);
       this.emit('complete');
@@ -157,6 +187,7 @@ export class ClaudeSDKClient extends BaseSDKClient {
       // Use the client's sendMessage method
       await this.client.sendMessage(message.content);
     } catch (error) {
+      console.error('[ClaudeSDK] Error sending message:', error);
       this.emitError(error instanceof Error ? error : new Error(String(error)));
       throw error;
     }
@@ -208,11 +239,33 @@ export class ClaudeSDKClient extends BaseSDKClient {
   async close(): Promise<void> {
     if (this.client) {
       try {
-        await this.client.shutdown();
+        this.client.kill();
       } catch (error) {
-        console.warn('[ClaudeSDK] Error during shutdown:', error);
+        console.warn('[ClaudeSDK] Error during close:', error);
       }
     }
     this.setStatus('idle');
+  }
+
+  /**
+   * Override setCwd to restart the Claude process with a new working directory
+   */
+  async setCwd(newCwd: string): Promise<boolean> {
+    if (this.config.cwd === newCwd) {
+      return false;
+    }
+
+    console.log(`[ClaudeSDK] Changing working directory from ${this.config.cwd} to ${newCwd}`);
+
+    // Close existing client
+    await this.close();
+
+    // Update config
+    this.config.cwd = newCwd;
+
+    // Restart with new cwd
+    await this.start();
+
+    return true;
   }
 }

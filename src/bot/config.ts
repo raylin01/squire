@@ -10,6 +10,7 @@ import os from 'os';
 
 const SQUIREBOT_DIR = path.join(os.homedir(), '.squirebot');
 const CONFIG_FILE = path.join(SQUIREBOT_DIR, 'config.json');
+const WORKSPACES_DIR = path.join(SQUIREBOT_DIR, 'workspaces');
 
 export interface SquireBotConfig {
   // Discord
@@ -20,12 +21,23 @@ export interface SquireBotConfig {
   squire?: {
     provider?: 'claude' | 'gemini' | 'codex';
     model?: string;
+    cliPath?: string;
     permissionMode?: 'strict' | 'autoSafe' | 'permissive';
   };
+
+  // Squire identity
+  name?: string;
+
+  // SDK session persistence
+  resumeSessionId?: string;
 
   // Behavior
   allowedGuilds?: string[];
   allowedUsers?: string[];
+
+  // Default project path for new workspaces
+  // If not set, SDK will spawn in the squire process directory
+  defaultProjectPath?: string;
 
   // Forum configuration
   forums?: Record<string, ForumConfig>;
@@ -120,4 +132,31 @@ export function getConfigPath(): string {
 
 export function getSquireBotDir(): string {
   return SQUIREBOT_DIR;
+}
+
+/**
+ * Get the sandbox directory for a workspace.
+ * Creates it if it doesn't exist.
+ */
+export function getWorkspaceSandboxDir(workspaceId: string): string {
+  // Use first 8 chars of workspaceId for readable directory names
+  const shortId = workspaceId.slice(0, 8);
+  const sandboxDir = path.join(WORKSPACES_DIR, shortId);
+
+  if (!fs.existsSync(sandboxDir)) {
+    fs.mkdirSync(sandboxDir, { recursive: true });
+    console.log(`[SquireBot] Created sandbox directory: ${sandboxDir}`);
+  }
+
+  return sandboxDir;
+}
+
+/**
+ * Get the base workspaces directory
+ */
+export function getWorkspacesDir(): string {
+  if (!fs.existsSync(WORKSPACES_DIR)) {
+    fs.mkdirSync(WORKSPACES_DIR, { recursive: true });
+  }
+  return WORKSPACES_DIR;
 }

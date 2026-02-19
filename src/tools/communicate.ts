@@ -1,13 +1,13 @@
 /**
  * Squire Communication Tool
  *
- * The primary way for Squire to communicate with users.
- * All output to users should go through this tool.
+ * The ONLY way for Squire to communicate with users.
+ * All output to users MUST go through this tool - regular output is NOT sent to Discord.
  */
 
 import { defineTool } from './registry.js';
 
-export type MessageType = 'text' | 'embed' | 'file' | 'image';
+export type MessageType = 'text' | 'embed' | 'file';
 
 export interface CommunicationOptions {
   /** Type of message */
@@ -22,11 +22,8 @@ export interface CommunicationOptions {
   /** Embed color (for embed type): green, red, yellow, blue, orange, purple */
   color?: 'green' | 'red' | 'yellow' | 'blue' | 'orange' | 'purple';
 
-  /** File path (for file/image type) */
+  /** File path (for file type) - supports ANY file type: images, videos, code, documents, etc. */
   filePath?: string;
-
-  /** Image URL (for image type) */
-  imageUrl?: string;
 
   /** Whether to ping the user */
   ping?: boolean;
@@ -47,7 +44,7 @@ export function setCommunicationHandler(
 
 /**
  * Send a message to the user.
- * This is the primary way Squire communicates.
+ * This is the ONLY way Squire communicates - regular output is NOT sent to Discord.
  */
 export async function communicate(options: CommunicationOptions): Promise<string> {
   if (!communicationHandler) {
@@ -61,33 +58,29 @@ export async function communicate(options: CommunicationOptions): Promise<string
 // Register the communicate tool
 defineTool(
   'squire_communicate',
-  'Send a message to the user. This is the ONLY way to communicate with the user. Use this for all outputs, status updates, questions, and results.',
+  'Send a message to the user on Discord. This is the ONLY way to communicate - your regular text output is NOT automatically sent. Use this for ALL messages, responses, status updates, and file sharing.',
   {
     type: {
       type: 'string',
-      description: 'Type of message: text, embed, file, or image',
-      enum: ['text', 'embed', 'file', 'image'],
+      description: 'Type of message: text (simple message), embed (rich formatted message with title/color), file (attach any file type - images, videos, code, documents, etc.)',
+      enum: ['text', 'embed', 'file'],
     },
     content: {
       type: 'string',
-      description: 'Text content for text messages, or description for embeds',
+      description: 'Text content for text messages, description for embeds, or optional message with file',
     },
     title: {
       type: 'string',
-      description: 'Title for embed messages',
+      description: 'Title for embed messages (required for embed type)',
     },
     color: {
       type: 'string',
-      description: 'Color for embed: green, red, yellow, blue, orange, purple',
+      description: 'Color for embed: green (success), red (error), yellow (warning), blue (info), orange, purple',
       enum: ['green', 'red', 'yellow', 'blue', 'orange', 'purple'],
     },
     filePath: {
       type: 'string',
-      description: 'Path to file for file/image type',
-    },
-    imageUrl: {
-      type: 'string',
-      description: 'URL of image for image type',
+      description: 'Local file path to attach. Supports ANY file type: images (.png, .jpg, .gif), videos (.mp4, .mov), code files (.ts, .js, .py), documents (.pdf, .txt), etc.',
     },
     ping: {
       type: 'boolean',
@@ -102,7 +95,6 @@ defineTool(
       title: input.title as string | undefined,
       color: input.color as CommunicationOptions['color'],
       filePath: input.filePath as string | undefined,
-      imageUrl: input.imageUrl as string | undefined,
       ping: input.ping as boolean | undefined,
     };
 
@@ -138,8 +130,4 @@ export async function sendWarning(title: string, description: string): Promise<s
 
 export async function sendFile(filePath: string, content?: string): Promise<string> {
   return communicate({ type: 'file', filePath, content });
-}
-
-export async function sendImage(imageUrl: string, content?: string): Promise<string> {
-  return communicate({ type: 'image', imageUrl, content });
 }

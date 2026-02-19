@@ -9,9 +9,11 @@
 import {
   Client,
   GatewayIntentBits,
+  Partials,
   Events,
   ActivityType,
   EmbedBuilder,
+  AttachmentBuilder,
   ChannelType,
   Message,
   TextChannel,
@@ -20,7 +22,7 @@ import {
 } from 'discord.js';
 import { Squire, createSquire } from './index.js';
 import type { WorkspaceSource } from './index.js';
-import { loadConfig, saveConfig, createDefaultConfig, getConfigPath, getSquireBotDir } from './bot/config.js';
+import { loadConfig, saveConfig, createDefaultConfig, getConfigPath, getSquireBotDir, getWorkspaceSandboxDir } from './bot/config.js';
 import type { SquireBotConfig } from './bot/config.js';
 import { setupDmHandler } from './bot/handlers/dm.js';
 import { handleCommand, setupCommandHandler } from './bot/handlers/commands.js';
@@ -42,11 +44,13 @@ import path from 'path';
  */
 class WorkspaceManager {
   private squire: Squire;
+  private config: SquireBotConfig;
   private channelToWorkspace = new Map<string, string>(); // channelId -> workspaceId
   private workspaceToChannel = new Map<string, string>(); // workspaceId -> channelId
 
-  constructor(squire: Squire) {
+  constructor(squire: Squire, config: SquireBotConfig) {
     this.squire = squire;
+    this.config = config;
     // Restore mappings from saved workspaces
     this.restoreFromSavedWorkspaces();
   }
@@ -80,15 +84,41 @@ class WorkspaceManager {
         this.workspaceToChannel.set(workspaceId, channelId);
         console.log(`[Workspace] Reconnected to ${workspaceId} for ${source}:${channelName}`);
       } else {
-        const workspace = await this.squire.createWorkspace({
+        // Build workspace options
+        // Each workspace gets its own sandbox directory for isolation
+        const tempId = `temp-${Date.now()}`;
+        const workspaceOptions: {
+          name: string;
+          source: WorkspaceSource;
+          sourceId: string;
+          context?: { projectPath: string; sandboxPath: string };
+        } = {
           name: channelName,
           source,
           sourceId: channelId,
-        });
+        };
+
+        // Create workspace first to get the real workspaceId
+        const workspace = await this.squire.createWorkspace(workspaceOptions);
         workspaceId = workspace.workspaceId;
+
+        // Now create sandbox directory using the real workspaceId
+        const sandboxDir = getWorkspaceSandboxDir(workspaceId);
+
+        // Update workspace with sandbox path (and optionally default project path)
+        workspace.context = {
+          ...workspace.context,
+          sandboxPath: sandboxDir,
+          // Use defaultProjectPath if configured, otherwise use sandbox
+          projectPath: this.config.defaultProjectPath || sandboxDir,
+        };
+
+        // Save the updated workspace
+        await this.squire.saveWorkspaces();
+
+        console.log(`[Workspace] Created ${workspaceId} for ${source}:${channelName} (sandbox: ${sandboxDir})`);
         this.channelToWorkspace.set(channelId, workspaceId);
         this.workspaceToChannel.set(workspaceId, channelId);
-        console.log(`[Workspace] Created ${workspaceId} for ${source}:${channelName}`);
       }
     }
 
@@ -154,6 +184,13 @@ class DiscordCommunicator {
    */
   registerChannel(workspaceId: string, channel: TextChannel | DMChannel | ThreadChannel): void {
     this.channelMap.set(workspaceId, channel);
+  }
+
+  /**
+   * Get channel for a workspace
+   */
+  getChannel(workspaceId: string): TextChannel | DMChannel | ThreadChannel | undefined {
+    return this.channelMap.get(workspaceId);
   }
 
   /**
@@ -240,6 +277,37 @@ class DiscordCommunicator {
       .setTimestamp();
 
     await channel.send({ embeds: [embed] });
+  }
+
+  /**
+   * Send a file to the workspace's Discord channel
+   */
+  async sendFile(
+    workspaceId: string,
+    filePath: string,
+    content?: string
+  ): Promise<void> {
+    const channel = this.channelMap.get(workspaceId);
+    if (!channel) {
+      console.warn(`[Communicator] No channel for workspace ${workspaceId}`);
+      return;
+    }
+
+    const fs = await import('fs');
+    const path = await import('path');
+
+    if (!fs.existsSync(filePath)) {
+      console.error(`[Communicator] File not found: ${filePath}`);
+      return;
+    }
+
+    const fileName = path.basename(filePath);
+    const attachment = new AttachmentBuilder(filePath);
+
+    await channel.send({
+      content: content || undefined,
+      files: [attachment],
+    });
   }
 
   /**
@@ -338,14 +406,19 @@ async function main(): Promise<void> {
       GatewayIntentBits.DirectMessages,
       GatewayIntentBits.GuildMessageReactions,
     ],
+    partials: [
+      Partials.Channel,  // Required for DM events
+    ],
   });
 
   // Create Squire instance
   const squireConfig = {
     squireId: `squire-${Date.now()}`,
-    name: 'Squire',
+    name: config.name || 'Squire',
     sdk: {
       provider: (config.squire?.provider || 'claude') as 'claude' | 'gemini' | 'codex',
+      cliPath: config.squire?.cliPath,
+      resumeSessionId: config.resumeSessionId,
     },
     permissions: {
       mode: 'autoSafe' as const,
@@ -360,8 +433,22 @@ async function main(): Promise<void> {
   };
 
   const squire = createSquire(squireConfig);
-  const workspaceManager = new WorkspaceManager(squire);
+  const workspaceManager = new WorkspaceManager(squire, config);
   const communicator = new DiscordCommunicator(client);
+
+  // Save session ID after Squire starts (SDK will have created/resumed a session)
+  squire.on('squire_started', async () => {
+    // Get the session ID from the SDK client if available
+    const sdkClient = (squire as any).sdkClient;
+    if (sdkClient?.client?.sessionId) {
+      const sessionId = sdkClient.client.sessionId;
+      if (sessionId && sessionId !== config.resumeSessionId) {
+        config.resumeSessionId = sessionId;
+        saveConfig(config);
+        console.log(`[SquireBot] Saved session ID: ${sessionId}`);
+      }
+    }
+  });
 
   // Handle Squire communication events
   squire.on('communication', async (event: any) => {
@@ -378,6 +465,12 @@ async function main(): Promise<void> {
         (data.title as string) || 'Update',
         data.content as string,
         (data.color as 'green' | 'red' | 'blue') || 'blue'
+      );
+    } else if (data.type === 'file' && data.filePath) {
+      await communicator.sendFile(
+        workspaceId,
+        data.filePath as string,
+        data.content as string | undefined
       );
     }
   });
@@ -425,7 +518,7 @@ async function main(): Promise<void> {
     });
   });
 
-  // Handle SDK output events - send stdout to Discord when throttler flushes
+  // Handle SDK output events - send complete messages to Discord
   squire.on('output', async (event: any) => {
     const data = event.data;
     const workspaceId = data.workspaceId as string | undefined;
@@ -433,18 +526,15 @@ async function main(): Promise<void> {
     const outputType = data.outputType as string;
     const isComplete = data.isComplete as boolean;
 
-    if (!workspaceId || !content || content.trim() === '') {
-      return;
+    // Log output for debugging
+    if (outputType === 'stdout' && content && content.trim()) {
+      console.log(`[Squire] Output (${workspaceId?.slice(0, 8)}...): ${content.slice(0, 100)}...`);
     }
 
-    // Only send stdout output to Discord (thinking is internal)
-    if (outputType !== 'stdout') {
-      return;
+    // Auto-send complete stdout messages to Discord
+    if (isComplete && outputType === 'stdout' && content && content.trim() && workspaceId) {
+      await communicator.sendText(workspaceId, content);
     }
-
-    // Send output when throttler flushes (every 500ms when there's content)
-    // This gives real-time feedback without waiting for completion
-    await communicator.sendText(workspaceId, content);
   });
 
   // Handle complete events - session finished
@@ -474,6 +564,39 @@ async function main(): Promise<void> {
       if (!handled) {
         // No channel registered, deny the request
         console.error(`[Squire] No channel for AskUserQuestion in workspace ${workspaceId}`);
+      }
+      return;
+    }
+
+    // Handle general tool approvals - show prompt in Discord
+    const workspaceId = data.workspaceId as string | undefined;
+    if (workspaceId) {
+      const channel = communicator.getChannel(workspaceId);
+      if (channel) {
+        // Build approval message
+        let description = `**Tool:** ${data.toolName}`;
+        if (data.toolName === 'bash' || data.toolName === 'Bash') {
+          const command = data.toolInput?.command as string;
+          description += `\n**Command:** \`${command?.slice(0, 100)}${command && command.length > 100 ? '...' : ''}\``;
+        }
+        if (data.reason) {
+          description += `\n**Reason:** ${data.reason}`;
+        }
+        description += `\n\nType \`!approve\` to allow or \`!deny\` to reject.`;
+
+        const embed = new EmbedBuilder()
+          .setTitle('Approval Required')
+          .setDescription(description)
+          .setColor(0xFFA500);  // Orange
+
+        try {
+          await channel.send({ embeds: [embed] });
+        } catch (error) {
+          console.error('[Squire] Failed to send approval prompt:', error);
+        }
+      } else {
+        console.log(`[Squire] No channel for workspace ${workspaceId}, auto-deny`);
+        await squire.respondToApproval(data.requestId, false, workspaceId);
       }
     }
   });
@@ -549,8 +672,17 @@ async function main(): Promise<void> {
     setupSlashCommandHandler(client, squire);
 
     // Register slash commands with Discord
+    // If DISCORD_GUILD_ID is set, commands register instantly (for dev)
+    // Otherwise, commands register globally (takes up to 1 hour)
+    const guildId = process.env.DISCORD_GUILD_ID;
     try {
-      await registerSlashCommands(config.discordToken, config.discordAppId);
+      await registerSlashCommands(config.discordToken, config.discordAppId, guildId);
+      if (guildId) {
+        console.log(`[SquireBot] Slash commands registered for guild ${guildId} (instant)`);
+      } else {
+        console.log('[SquireBot] Slash commands registered globally (may take up to 1 hour to appear)');
+        console.log('[SquireBot] Tip: Set DISCORD_GUILD_ID env var for instant command registration during dev');
+      }
     } catch (error) {
       console.error('[SquireBot] Failed to register slash commands:', error);
       // Continue anyway - bot still works without slash commands
