@@ -319,6 +319,46 @@ const COMMANDS: Record<string, { handler: CommandHandler; help: string }> = {
       }
     },
   },
+
+  project: {
+    help: 'Set or show the workspace project directory (e.g., !project /path/to/repo)',
+    handler: async (ctx, args) => {
+      const projectPath = args.join(' ').trim();
+
+      if (!projectPath) {
+        // Show current project path
+        const workspace = ctx.squire.getWorkspace(ctx.workspaceId);
+        const currentPath = workspace?.context?.projectPath;
+        if (currentPath) {
+          return `Current project directory: \`${currentPath}\``;
+        }
+        return 'No project directory set. Use `!project /path/to/repo` to set one.';
+      }
+
+      // Validate path exists
+      const fs = await import('fs');
+      if (!fs.existsSync(projectPath)) {
+        return `Path does not exist: \`${projectPath}\``;
+      }
+
+      // Update workspace context
+      const workspace = ctx.squire.getWorkspace(ctx.workspaceId);
+      if (workspace) {
+        workspace.context = workspace.context || {};
+        workspace.context.projectPath = projectPath;
+      }
+
+      return `Project directory set to: \`${projectPath}\``;
+    },
+  },
+
+  cd: {
+    help: 'Change workspace directory (alias for !project)',
+    handler: async (ctx, args) => {
+      // Just delegate to project command
+      return COMMANDS.project.handler(ctx, args);
+    },
+  },
 };
 
 /**

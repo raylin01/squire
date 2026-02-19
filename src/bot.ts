@@ -118,6 +118,7 @@ class DiscordCommunicator {
   private channelMap = new Map<string, TextChannel | DMChannel | ThreadChannel>(); // workspaceId -> channel
   private workspaceManager: WorkspaceManager | null = null;
   private typingIntervals = new Map<string, NodeJS.Timeout>(); // workspaceId -> interval
+  private streamingMessages = new Map<string, Message>(); // workspaceId -> current streaming message
 
   constructor(client: Client) {
     this.client = client;
@@ -189,6 +190,52 @@ class DiscordCommunicator {
     if (interval) {
       clearInterval(interval);
       this.typingIntervals.delete(workspaceId);
+    }
+  }
+
+  /**
+   * Stream text to the workspace's Discord channel (sends first, then edits)
+   * This provides real-time updates without spamming multiple messages
+   */
+  async streamText(workspaceId: string, content: string, isComplete: boolean): Promise<void> {
+    const channel = this.channelMap.get(workspaceId);
+    if (!channel) {
+      console.warn(`[Communicator] No channel for workspace ${workspaceId}`);
+      return;
+    }
+
+    const existingMessage = this.streamingMessages.get(workspaceId);
+
+    // Split content into chunks (Discord limit is 2000 chars)
+    const chunks = this.splitMessage(content, 2000);
+
+    if (!existingMessage) {
+      // Send first chunk as new message
+      const msg = await channel.send(chunks[0]);
+      this.streamingMessages.set(workspaceId, msg);
+
+      // Send remaining chunks as new messages if content is long
+      for (let i = 1; i < chunks.length; i++) {
+        await channel.send(chunks[i]);
+      }
+    } else {
+      // Edit existing message with updated content
+      try {
+        await existingMessage.edit(chunks[0]);
+
+        // For multi-chunk messages, we just update the first one
+        // Additional chunks remain as-is (simpler than managing multiple edits)
+      } catch (error) {
+        // Message might be too old to edit (Discord limit) or deleted
+        // Send as new message instead
+        const msg = await channel.send(chunks[0]);
+        this.streamingMessages.set(workspaceId, msg);
+      }
+    }
+
+    // Clear tracking when complete
+    if (isComplete) {
+      this.streamingMessages.delete(workspaceId);
     }
   }
 
@@ -429,7 +476,7 @@ async function main(): Promise<void> {
     });
   });
 
-  // Handle SDK output events - send to Discord channel
+  // Handle SDK output events - stream to Discord channel with edits
   squire.on('output', async (event: any) => {
     const data = event.data;
     const workspaceId = data.workspaceId as string | undefined;
@@ -442,10 +489,12 @@ async function main(): Promise<void> {
     }
 
     // Only send stdout output to Discord (thinking is internal)
-    // Only send when complete to avoid spamming partial output
-    if (outputType === 'stdout' && isComplete) {
-      await communicator.sendText(workspaceId, content);
+    if (outputType !== 'stdout') {
+      return;
     }
+
+    // Stream output to Discord (sends first message, then edits as content grows)
+    await communicator.streamText(workspaceId, content, isComplete);
   });
 
   // Handle complete events - session finished

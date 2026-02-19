@@ -583,6 +583,11 @@ export class Squire extends EventEmitter {
     // Build message with compact context
     let contextContent = content;
 
+    // Add working directory context if workspace has a project path
+    if (workspace.context?.projectPath) {
+      contextContent = `[Working directory: ${workspace.context.projectPath}]\n\n${contextContent}`;
+    }
+
     // Add compact personality summary (not full prompt every time)
     if (this.personalityManager) {
       const personality = this.personalityManager.getPersonality(workspaceId);
@@ -590,11 +595,11 @@ export class Squire extends EventEmitter {
 
       // Compact summary - just key traits
       const personalitySummary = `[You are ${this.config.name}. Tone: ${traits.tone}, Verbosity: ${traits.verbosity}, Technicality: ${traits.technicality}]`;
-      contextContent = `${personalitySummary}\n\n${content}`;
+      contextContent = `${personalitySummary}\n\n${contextContent}`;
 
       // Add custom instructions if present
       if (personality.customInstructions) {
-        contextContent = `${personalitySummary}\n[Additional: ${personality.customInstructions}]\n\n${content}`;
+        contextContent = `${personalitySummary}\n[Additional: ${personality.customInstructions}]\n\n${contextContent}`;
       }
     }
 
