@@ -148,6 +148,8 @@ class DiscordCommunicator {
   private channelMap = new Map<string, TextChannel | DMChannel | ThreadChannel>(); // workspaceId -> channel
   private workspaceManager: WorkspaceManager | null = null;
   private typingIntervals = new Map<string, NodeJS.Timeout>(); // workspaceId -> interval
+  private streamingMessages = new Map<string, Message>(); // workspaceId -> current streaming message
+  private lastStreamContent = new Map<string, string>(); // workspaceId -> last sent content (for dedup)
 
   constructor(client: Client) {
     this.client = client;
@@ -231,19 +233,58 @@ class DiscordCommunicator {
 
   /**
    * Send a text message to the workspace's Discord channel
+   * For streaming: edits existing message if one exists, otherwise creates new
    */
-  async sendText(workspaceId: string, content: string): Promise<void> {
+  async sendText(workspaceId: string, content: string, isComplete: boolean = true): Promise<void> {
     const channel = this.channelMap.get(workspaceId);
     if (!channel) {
       console.warn(`[Communicator] No channel for workspace ${workspaceId}, registered channels: ${Array.from(this.channelMap.keys()).join(', ')}`);
       return;
     }
 
-    // Split long messages
-    const chunks = this.splitMessage(content, 2000);
-    for (const chunk of chunks) {
-      await channel.send(chunk);
+    // Skip if content hasn't changed (dedup)
+    const lastContent = this.lastStreamContent.get(workspaceId);
+    if (lastContent === content) {
+      return;
     }
+    this.lastStreamContent.set(workspaceId, content);
+
+    // For streaming: edit existing message or create new
+    const existingMessage = this.streamingMessages.get(workspaceId);
+
+    if (existingMessage && !isComplete) {
+      // Edit existing message
+      try {
+        const trimmedContent = content.slice(0, 2000);
+        await existingMessage.edit(trimmedContent);
+        return;
+      } catch (error) {
+        // If edit fails (message deleted, etc.), create new
+        console.warn('[Communicator] Failed to edit message, creating new:', error);
+        this.streamingMessages.delete(workspaceId);
+      }
+    }
+
+    // Send new message
+    const trimmedContent = content.slice(0, 2000);
+    const message = await channel.send(trimmedContent);
+
+    // Track for streaming if not complete
+    if (!isComplete) {
+      this.streamingMessages.set(workspaceId, message);
+    } else {
+      // Clear streaming state when complete
+      this.streamingMessages.delete(workspaceId);
+      this.lastStreamContent.delete(workspaceId);
+    }
+  }
+
+  /**
+   * Clear streaming state for a workspace (call when session changes)
+   */
+  clearStreamingState(workspaceId: string): void {
+    this.streamingMessages.delete(workspaceId);
+    this.lastStreamContent.delete(workspaceId);
   }
 
   /**
@@ -531,9 +572,9 @@ async function main(): Promise<void> {
       // Strip any tool blocks from output before sending to Discord
       let cleanContent = content.replace(/```squire-tool\n[\s\S]*?```/g, '').trim();
 
-      // Send on complete, or on streaming if content is substantial
-      if (cleanContent && (isComplete || cleanContent.length > 100)) {
-        await communicator.sendText(workspaceId, cleanContent);
+      // Send content (will edit existing message during streaming)
+      if (cleanContent) {
+        await communicator.sendText(workspaceId, cleanContent, isComplete);
       }
     }
   });
@@ -543,6 +584,10 @@ async function main(): Promise<void> {
     const data = event.data;
     const workspaceId = data.workspaceId as string | undefined;
     console.log(`[Squire] Session complete for workspace: ${workspaceId}`);
+    // Clear streaming state when session completes
+    if (workspaceId) {
+      communicator.clearStreamingState(workspaceId);
+    }
   });
 
   // Handle approval requests
