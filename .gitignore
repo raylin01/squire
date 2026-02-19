@@ -39,6 +39,14 @@ coverage/
 # Squire data (user-specific)
 .squire/
 
+# Squire data files
+workspaces.json
+tickets.db
+scheduler.db
+memory/
+MEMORY.md
+daily-logs/
+
 # Temporary files
 *.tmp
 *.temp

@@ -60,7 +60,10 @@ export class OutputThrottler {
       this.timer = null;
     }
 
+    console.log(`[OutputThrottler] flush(isComplete=${isComplete}), pendingStdout=${this.pendingStdout?.length || 0}chars, pendingThinking=${this.pendingThinking?.length || 0}chars`);
+
     if (this.pendingStdout && this.pendingStdout !== this.lastEmittedStdout) {
+      console.log(`[OutputThrottler] Emitting stdout: ${this.pendingStdout?.slice(0, 100)}...`);
       this.emit({
         content: this.pendingStdout,
         isComplete,
@@ -70,6 +73,7 @@ export class OutputThrottler {
     }
 
     if (this.pendingThinking && this.pendingThinking !== this.lastEmittedThinking) {
+      console.log(`[OutputThrottler] Emitting thinking: ${this.pendingThinking?.slice(0, 100)}...`);
       this.emit({
         content: this.pendingThinking,
         isComplete,

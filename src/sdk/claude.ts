@@ -86,8 +86,10 @@ export class ClaudeSDKClient extends BaseSDKClient {
     });
 
     this.client.on('assistant', (msg: any) => {
+      console.log(`[ClaudeSDK] Assistant event received, blocks: ${msg.message?.content?.length || 0}`);
       for (const block of msg.message?.content || []) {
         if (block.type === 'text') {
+          console.log(`[ClaudeSDK] Text block: ${block.text?.slice(0, 100)}...`);
           this.emitOutput(block.text, false, 'stdout');
         } else if (block.type === 'tool_use') {
           this.emit('tool_use', {
@@ -122,6 +124,7 @@ export class ClaudeSDKClient extends BaseSDKClient {
     });
 
     this.client.on('result', () => {
+      console.log('[ClaudeSDK] Result event received, flushing output');
       this.setStatus('idle');
       this.outputThrottler.flush(true);
       this.emit('complete');
