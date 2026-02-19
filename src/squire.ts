@@ -235,6 +235,8 @@ export class Squire extends EventEmitter {
 
     session.on('tool_use', async (event) => {
       this.updateActivity(`using ${event.toolName}`);
+      // Emit tool_use event for message breaking in Discord
+      this.emitEvent('tool_use', { workspaceId: event.workspaceId, toolName: event.toolName });
       await this.handleToolUse(event, session);
     });
 

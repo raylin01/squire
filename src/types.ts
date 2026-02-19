@@ -417,6 +417,7 @@ export type SquireEventType =
   | 'workspace_updated'
   | 'output'
   | 'thinking'
+  | 'tool_use'
   | 'complete'
   | 'memory_added'
   | 'memory_searched'

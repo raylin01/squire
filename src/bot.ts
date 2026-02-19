@@ -150,6 +150,7 @@ class DiscordCommunicator {
   private typingIntervals = new Map<string, NodeJS.Timeout>(); // workspaceId -> interval
   private streamingMessages = new Map<string, Message>(); // workspaceId -> current streaming message
   private lastStreamContent = new Map<string, string>(); // workspaceId -> last sent content (for dedup)
+  private lastOutputType = new Map<string, string>(); // workspaceId -> last output type (stdout, thinking, tool)
 
   constructor(client: Client) {
     this.client = client;
@@ -285,6 +286,26 @@ class DiscordCommunicator {
   clearStreamingState(workspaceId: string): void {
     this.streamingMessages.delete(workspaceId);
     this.lastStreamContent.delete(workspaceId);
+    this.lastOutputType.delete(workspaceId);
+  }
+
+  /**
+   * Check if output type changed and start a new message if so.
+   * Returns true if type changed (caller should start fresh).
+   */
+  checkOutputTypeChange(workspaceId: string, newType: string): boolean {
+    const lastType = this.lastOutputType.get(workspaceId);
+    const changed = lastType !== undefined && lastType !== newType;
+
+    if (changed) {
+      // Type changed - clear streaming state to start a new message
+      this.streamingMessages.delete(workspaceId);
+      this.lastStreamContent.delete(workspaceId);
+    }
+
+    // Update the tracked type
+    this.lastOutputType.set(workspaceId, newType);
+    return changed;
   }
 
   /**
@@ -567,15 +588,27 @@ async function main(): Promise<void> {
     const outputType = data.outputType as string;
     const isComplete = data.isComplete as boolean;
 
-    // Send stdout to Discord when we have content (streaming or complete)
-    if (outputType === 'stdout' && content && content.trim() && workspaceId) {
+    // Handle both stdout and thinking output
+    if ((outputType === 'stdout' || outputType === 'thinking') && content && content.trim() && workspaceId) {
+      // Check if output type changed - creates new message on transitions
+      communicator.checkOutputTypeChange(workspaceId, outputType);
+
       // Strip any tool blocks from output before sending to Discord
       let cleanContent = content.replace(/```squire-tool\n[\s\S]*?```/g, '').trim();
 
-      // Send content (will edit existing message during streaming)
+      // Send content (will edit existing message during streaming, new message if type changed)
       if (cleanContent) {
         await communicator.sendText(workspaceId, cleanContent, isComplete);
       }
+    }
+  });
+
+  // Handle tool_use events - break message stream when tool is used
+  squire.on('tool_use', async (event: any) => {
+    const workspaceId = event.data?.workspaceId as string | undefined;
+    if (workspaceId) {
+      // Clear streaming state so next output creates a new message
+      communicator.clearStreamingState(workspaceId);
     }
   });
 
