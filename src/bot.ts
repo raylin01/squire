@@ -518,7 +518,7 @@ async function main(): Promise<void> {
     });
   });
 
-  // Handle SDK output events - send complete messages to Discord
+  // Handle SDK output events - stream messages to Discord
   squire.on('output', async (event: any) => {
     const data = event.data;
     const workspaceId = data.workspaceId as string | undefined;
@@ -526,14 +526,15 @@ async function main(): Promise<void> {
     const outputType = data.outputType as string;
     const isComplete = data.isComplete as boolean;
 
-    // Log output for debugging
-    if (outputType === 'stdout' && content && content.trim()) {
-      console.log(`[Squire] Output (${workspaceId?.slice(0, 8)}...): ${content.slice(0, 100)}...`);
-    }
+    // Send stdout to Discord when we have content (streaming or complete)
+    if (outputType === 'stdout' && content && content.trim() && workspaceId) {
+      // Strip any tool blocks from output before sending to Discord
+      let cleanContent = content.replace(/```squire-tool\n[\s\S]*?```/g, '').trim();
 
-    // Auto-send complete stdout messages to Discord
-    if (isComplete && outputType === 'stdout' && content && content.trim() && workspaceId) {
-      await communicator.sendText(workspaceId, content);
+      // Send on complete, or on streaming if content is substantial
+      if (cleanContent && (isComplete || cleanContent.length > 100)) {
+        await communicator.sendText(workspaceId, cleanContent);
+      }
     }
   });
 
