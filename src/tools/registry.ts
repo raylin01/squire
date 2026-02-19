@@ -19,6 +19,29 @@ export interface RegisteredTool extends SDKTool {
   externalPath?: string;
 }
 
+/**
+ * Execution context passed to tools during execution.
+ * This is set before tool execution and cleared after.
+ */
+export interface ToolExecutionContext {
+  workspaceId?: string;
+}
+
+// Current execution context (thread-local pattern)
+let currentExecutionContext: ToolExecutionContext = {};
+
+export function setExecutionContext(context: ToolExecutionContext): void {
+  currentExecutionContext = context;
+}
+
+export function getExecutionContext(): ToolExecutionContext {
+  return currentExecutionContext;
+}
+
+export function clearExecutionContext(): void {
+  currentExecutionContext = {};
+}
+
 class ToolRegistry {
   private tools = new Map<string, RegisteredTool>();
   private toolLoader: ToolLoader | null = null;

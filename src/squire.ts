@@ -34,7 +34,7 @@ import { SkillManager, createSkillManager } from './skills/index.js';
 import { Scheduler, createScheduler } from './scheduler/index.js';
 import { TicketManager, createTicketManager } from './tickets/index.js';
 import { PersonalityManager, createPersonalityManager } from './personality/index.js';
-import { toolRegistry, setCommunicationHandler, communicate, setSelfManageState, setMemoryManager as setToolMemoryManager, setScheduler as setToolScheduler, setTicketManager as setToolTicketManager, setSquireInstance } from './tools/index.js';
+import { toolRegistry, setCommunicationHandler, communicate, setSelfManageState, setMemoryManager as setToolMemoryManager, setScheduler as setToolScheduler, setTicketManager as setToolTicketManager, setSquireInstance, setExecutionContext, clearExecutionContext, getExecutionContext } from './tools/index.js';
 import { checkBashPermission, checkToolPermission } from './permissions/index.js';
 import { WorkspaceSession } from './workspace-session.js';
 
@@ -72,8 +72,12 @@ export class Squire extends EventEmitter {
   private setupToolHandlers(): void {
     // Communication handler - connects squire_communicate to actual output
     setCommunicationHandler(async (options) => {
+      // Use execution context workspace (set during tool execution) or fall back to active
+      const context = getExecutionContext();
+      const targetWorkspaceId = context.workspaceId || this.activeWorkspaceId;
+
       this.emitEvent('communication', {
-        workspaceId: this.activeWorkspaceId,
+        workspaceId: targetWorkspaceId,
         type: options.type,
         content: options.content,
         title: options.title,
@@ -679,11 +683,15 @@ export class Squire extends EventEmitter {
       if (toolName && toolRegistry.has(toolName)) {
         try {
           console.log(`[Squire] Executing tool: ${toolName} (workspace: ${workspaceId?.slice(0, 8)}...)`);
+          // Set execution context so tools know which workspace they're responding to
+          setExecutionContext({ workspaceId });
           await toolRegistry.execute(toolName, params);
           // Remove the tool block from output
           result = result.replace(match[0], '');
         } catch (error) {
           console.error(`[Squire] Tool execution failed: ${toolName}`, error);
+        } finally {
+          clearExecutionContext();
         }
       }
     }
