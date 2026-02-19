@@ -85,13 +85,20 @@ export class ClaudeSDKClient extends BaseSDKClient {
       });
     });
 
-    this.client.on('assistant', (msg: any) => {
-      console.log(`[ClaudeSDK] Assistant event received, blocks: ${msg.message?.content?.length || 0}`);
-      for (const block of msg.message?.content || []) {
-        if (block.type === 'text') {
-          console.log(`[ClaudeSDK] Text block: ${block.text?.slice(0, 100)}...`);
-          this.emitOutput(block.text, false, 'stdout');
-        } else if (block.type === 'tool_use') {
+    // text_delta: incremental assistant text output
+    this.client.on('text_delta', (text: string) => {
+      this.appendOutput(text, false);  // Use append for incremental
+    });
+
+    // thinking_delta: incremental thinking output
+    this.client.on('thinking_delta', (text: string) => {
+      this.appendThinkingDelta(text, false);  // Use append for incremental
+    });
+
+    // message: full assistant message object (for tool_use events)
+    this.client.on('message', (msg: any) => {
+      for (const block of msg?.content || []) {
+        if (block.type === 'tool_use') {
           this.emit('tool_use', {
             toolName: block.name,
             toolId: block.id,

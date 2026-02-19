@@ -437,28 +437,14 @@ async function main(): Promise<void> {
     const outputType = data.outputType as string;
     const isComplete = data.isComplete as boolean;
 
-    console.log(`[Squire] Output event: type=${outputType}, complete=${isComplete}, workspace=${workspaceId}, content=${content?.slice(0, 50)}...`);
-
-    if (!workspaceId) {
-      console.warn('[Squire] Output event missing workspaceId');
-      return;
-    }
-
-    if (!content || content.trim() === '') {
-      console.log('[Squire] Output event has empty content, skipping');
+    if (!workspaceId || !content || content.trim() === '') {
       return;
     }
 
     // Only send stdout output to Discord (thinking is internal)
     // Only send when complete to avoid spamming partial output
     if (outputType === 'stdout' && isComplete) {
-      console.log(`[Squire] Sending output to Discord: ${content.length} chars`);
       await communicator.sendText(workspaceId, content);
-    } else if (outputType === 'thinking') {
-      // Log thinking for debugging
-      console.log(`[Squire] Thinking: ${content.slice(0, 100)}...`);
-    } else {
-      console.log(`[Squire] Not sending: outputType=${outputType}, isComplete=${isComplete}`);
     }
   });
 

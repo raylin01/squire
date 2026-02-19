@@ -54,16 +54,18 @@ export class OutputThrottler {
     this.schedule();
   }
 
+  appendThinking(content: string): void {
+    this.pendingThinking += content;
+    this.schedule();
+  }
+
   flush(isComplete: boolean = false): void {
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
     }
 
-    console.log(`[OutputThrottler] flush(isComplete=${isComplete}), pendingStdout=${this.pendingStdout?.length || 0}chars, pendingThinking=${this.pendingThinking?.length || 0}chars`);
-
     if (this.pendingStdout && this.pendingStdout !== this.lastEmittedStdout) {
-      console.log(`[OutputThrottler] Emitting stdout: ${this.pendingStdout?.slice(0, 100)}...`);
       this.emit({
         content: this.pendingStdout,
         isComplete,
@@ -73,7 +75,6 @@ export class OutputThrottler {
     }
 
     if (this.pendingThinking && this.pendingThinking !== this.lastEmittedThinking) {
-      console.log(`[OutputThrottler] Emitting thinking: ${this.pendingThinking?.slice(0, 100)}...`);
       this.emit({
         content: this.pendingThinking,
         isComplete,
@@ -280,7 +281,7 @@ export abstract class BaseSDKClient extends EventEmitter<SDKClientEventMap> {
     return this.approvalTracker.firstKey();
   }
 
-  // Helper to emit output
+  // Helper to emit output (replaces content)
   protected emitOutput(content: string, isComplete: boolean, outputType: 'stdout' | 'thinking'): void {
     this.outputThrottler.addStdout(content);
     if (isComplete) {
@@ -288,9 +289,25 @@ export abstract class BaseSDKClient extends EventEmitter<SDKClientEventMap> {
     }
   }
 
-  // Helper to emit thinking
+  // Helper to emit thinking (replaces content)
   protected emitThinking(content: string, isComplete: boolean): void {
     this.outputThrottler.addThinking(content);
+    if (isComplete) {
+      this.outputThrottler.flush(true);
+    }
+  }
+
+  // Helper to append output (for incremental/delta events)
+  protected appendOutput(content: string, isComplete: boolean): void {
+    this.outputThrottler.appendStdout(content);
+    if (isComplete) {
+      this.outputThrottler.flush(true);
+    }
+  }
+
+  // Helper to append thinking (for incremental/delta events)
+  protected appendThinkingDelta(content: string, isComplete: boolean): void {
+    this.outputThrottler.appendThinking(content);
     if (isComplete) {
       this.outputThrottler.flush(true);
     }

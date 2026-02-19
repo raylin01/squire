@@ -213,7 +213,6 @@ export class Squire extends EventEmitter {
       // Set up SDK event handlers
       this.sdkClient.on('output', (output) => {
         this.lastHeartbeat = new Date();
-        console.log(`[Squire] SDK output: type=${output.outputType}, complete=${output.isComplete}, activeWorkspace=${this.activeWorkspaceId}`);
 
         // Emit output event for Discord routing
         // Note: output.outputType can be 'stdout' or 'thinking'
@@ -224,8 +223,6 @@ export class Squire extends EventEmitter {
             outputType: output.outputType || 'stdout',
             isComplete: output.isComplete || false,
           });
-        } else {
-          console.warn('[Squire] SDK output received but no active workspace');
         }
       });
 
