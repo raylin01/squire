@@ -35,7 +35,7 @@ import {
   registerSlashCommands,
   setupSlashCommandHandler,
 } from './bot/handlers/slash-commands.js';
-import { PluginLoader, createPluginLoader } from './bot/plugins/index.js';
+import { PluginLoader, createPluginLoader, setPluginLoader } from './bot/plugins/index.js';
 import type { PluginInfo } from './bot/plugins/index.js';
 import path from 'path';
 
@@ -782,6 +782,9 @@ function updateSessionPrefixes(workspaceId: string) {
       communicator.registerChannel(workspaceId, channel);
     },
   });
+
+  // Set global plugin loader reference for commands
+  setPluginLoader(pluginLoader);
 
   client.once(Events.ClientReady, async (readyClient) => {
     console.log(`[SquireBot] Logged in as ${readyClient.user.tag}`);

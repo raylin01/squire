@@ -143,9 +143,21 @@ When the AI needs input, it shows an interactive button UI:
 
 ### Plugin System
 Plugins in `~/.squirebot/plugins/`:
-- Hot reload support
+- Hot reload support (`!plugins reload <name>`)
 - Safe mode (`--safe` flag disables all plugins)
 - Direct Discord.js access
+- Full access to Squire's context and workspace management
+
+**Plugin commands:**
+| Command | Description |
+|---------|-------------|
+| `!plugins` | List all plugins with status |
+| `!plugins reload <name>` | Hot reload a plugin |
+| `!plugins reload all` | Reload all plugins |
+| `!plugins enable <name>` | Enable a plugin |
+| `!plugins disable <name>` | Disable a plugin |
+
+**Create your own plugins:** See [PLUGINS.md](PLUGINS.md) for the complete plugin development guide.
 
 **Bundled plugins:**
 - `forum-handler` - Watches forum channels
@@ -212,6 +224,9 @@ Optional: QMD MCP Server ←-- AI calls directly for semantic search
 ```
 
 ## Documentation
+
+**Guides:**
+- [Plugin Development Guide](PLUGINS.md) - Create your own Discord.js plugins
 
 **Phase Plans:**
 - [Phase 1: Core Package](docs/phase-1-core.md)

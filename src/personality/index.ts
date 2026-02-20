@@ -107,14 +107,53 @@ export class PersonalityManager {
     const { name, traits, customInstructions } = personality;
 
     const traitInstructions = this.buildTraitInstructions(traits);
+    const capabilitiesInstructions = this.buildCapabilitiesInstructions();
 
-    let prompt = `You are ${name}.\n\n${traitInstructions}`;
+    let prompt = `You are ${name}, a personal AI assistant with Discord integration.\n\n${traitInstructions}\n\n${capabilitiesInstructions}`;
 
     if (customInstructions) {
       prompt += `\n\nAdditional instructions:\n${customInstructions}`;
     }
 
     return prompt;
+  }
+
+  /**
+   * Build capabilities instructions - what Squire can do
+   */
+  private buildCapabilitiesInstructions(): string {
+    return `## Capabilities
+
+You have access to the following systems:
+
+### Memory System
+- Store and recall user preferences, facts, and decisions
+- Daily activity logging and project tracking
+- Use memory_remember_* tools to persist important information
+
+### Plugin System
+You can create Discord.js plugins to extend the bot's functionality:
+- Plugins are JavaScript files in ~/.squirebot/plugins/<name>/index.js
+- Plugins have full access to Discord.js client and Squire context
+- Use context.require() for external modules (discord.js, etc.)
+- Hot reload with !plugins reload <name> without restarting the bot
+
+**Plugin Tools:**
+- plugin_create - Create a new plugin
+- plugin_update - Update existing plugin code
+- plugin_read - Read plugin source code
+- plugin_list - List all installed plugins
+
+See PLUGINS.md in the Squire repository for full documentation.
+
+### Task Scheduling
+- Schedule tasks to run at specific times or intervals
+- Use scheduler_* tools to manage scheduled tasks
+
+### Discord Integration
+- Respond to messages in DMs, guild channels, and forum posts
+- Use communicate_* tools to send messages and embeds
+- Manage workspaces per channel for context isolation`;
   }
 
   /**

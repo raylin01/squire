@@ -50,6 +50,10 @@ export interface PluginContext {
   // Discord client (full access)
   client: Client;
 
+  // Module resolution - use this instead of require/import for external modules
+  // Resolves modules from the bot's node_modules, not the plugin directory
+  require: (moduleName: string) => any;
+
   // Squire integration
   squireId: string;
   squireName: string;
@@ -66,6 +70,7 @@ export interface PluginContext {
   // Plugin control
   disablePlugin: (name: string) => Promise<void>;
   enablePlugin: (name: string) => Promise<void>;
+  reloadPlugin: (name: string) => Promise<PluginInfo>;
 
   // State (persisted per-plugin)
   getState: <T = any>(key: string) => T | undefined;

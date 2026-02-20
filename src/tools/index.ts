@@ -18,6 +18,7 @@ import './self-modify.js';
 import './memory.js';
 import './scheduler.js';
 import './tickets.js';
+import './plugins.js';
 
 // Re-export tool modules
 export * from './communicate.js';
@@ -26,5 +27,6 @@ export * from './self-modify.js';
 export * from './memory.js';
 export * from './scheduler.js';
 export * from './tickets.js';
+export * from './plugins.js';
 export * from './loader.js';
 export * from './frontmatter.js';

@@ -8,6 +8,25 @@
  * - Hot reloaded without restart
  */
 
+import type { PluginLoader } from './loader.js';
+
+// Global plugin loader reference for commands and other modules
+let _pluginLoader: PluginLoader | null = null;
+
+/**
+ * Set the global plugin loader reference
+ */
+export function setPluginLoader(loader: PluginLoader): void {
+  _pluginLoader = loader;
+}
+
+/**
+ * Get the global plugin loader reference
+ */
+export function getPluginLoader(): PluginLoader | null {
+  return _pluginLoader;
+}
+
 export { PluginLoader, createPluginLoader, type PluginLoaderOptions } from './loader.js';
 export type {
   SquirePlugin,

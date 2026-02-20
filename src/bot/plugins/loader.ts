@@ -7,7 +7,15 @@
 
 import fs from 'fs';
 import path from 'path';
+import { createRequire } from 'module';
+import { fileURLToPath } from 'url';
 import type { Client, TextChannel, DMChannel, ThreadChannel } from 'discord.js';
+
+// Create a require function that resolves from the bot's directory
+// This allows plugins to require modules from the bot's node_modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const botRequire = createRequire(path.join(__dirname, '../../..'));
 import type { Squire } from '../../index.js';
 import type { SquirePlugin, PluginContext, PluginState, PluginInfo, WorkspaceSource } from './types.js';
 
@@ -146,8 +154,10 @@ export class PluginLoader {
     }
 
     try {
-      // Dynamic import
-      const module = await import(loadedPath);
+      // Dynamic import with cache busting for hot reload support
+      // Add timestamp query param to force re-fetch for ESM modules
+      const cacheBuster = `?t=${Date.now()}`;
+      const module = await import(`${loadedPath}${cacheBuster}`);
       plugin = module.default || module.plugin;
 
       if (!plugin || !plugin.name) {
@@ -269,20 +279,44 @@ export class PluginLoader {
   }
 
   /**
-   * Reload a plugin
+   * Reload a plugin (hot reload without bot restart)
    */
   async reload(name: string): Promise<PluginInfo> {
     await this.unload(name);
 
-    // Clear from cache
+    // Clear from require cache (for CommonJS)
     const pluginPath = path.join(this.pluginsDir, name);
-    const cacheKey = require.resolve?.(pluginPath);
-    if (cacheKey && require.cache[cacheKey]) {
-      delete require.cache[cacheKey];
+    try {
+      const cacheKey = require.resolve(pluginPath);
+      if (require.cache[cacheKey]) {
+        delete require.cache[cacheKey];
+      }
+    } catch {
+      // Module not in cache, that's fine
     }
 
     this.plugins.delete(name);
+    console.log(`[Plugins] Reloading: ${name}`);
     return this.load(name);
+  }
+
+  /**
+   * Reload all plugins
+   */
+  async reloadAll(): Promise<Map<string, PluginInfo>> {
+    const pluginNames = Array.from(this.plugins.keys());
+    const results = new Map<string, PluginInfo>();
+
+    for (const name of pluginNames) {
+      try {
+        const info = await this.reload(name);
+        results.set(name, info);
+      } catch (error) {
+        console.error(`[Plugins] Failed to reload ${name}:`, error);
+      }
+    }
+
+    return results;
   }
 
   /**
@@ -383,6 +417,8 @@ export class PluginLoader {
       pluginDir,
       pluginName: name,
       client: this.client,
+      // Provide require that resolves from bot's node_modules
+      require: botRequire,
       squireId: this.squireId,
       squireName: this.squireName,
       squire: this.squire,
@@ -419,6 +455,10 @@ export class PluginLoader {
 
       enablePlugin: async (pluginName: string) => {
         await self.enable(pluginName);
+      },
+
+      reloadPlugin: async (pluginName: string) => {
+        return self.reload(pluginName);
       },
 
       getState: <T = any>(key: string): T | undefined => {

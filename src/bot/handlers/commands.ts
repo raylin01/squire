@@ -576,6 +576,111 @@ const COMMANDS: Record<string, { handler: CommandHandler; help: string }> = {
       return lines.join('\n');
     },
   },
+
+  plugins: {
+    help: 'Manage plugins. Usage: !plugins [list|reload|enable|disable] [name]',
+    handler: async (ctx, args) => {
+      const { getPluginLoader } = await import('../plugins/index.js');
+      const pluginLoader = getPluginLoader();
+
+      if (!pluginLoader) {
+        return 'Plugin system not initialized.';
+      }
+
+      const subCommand = args[0]?.toLowerCase();
+      const pluginName = args[1];
+
+      // Default to list if no subcommand
+      if (!subCommand || subCommand === 'list') {
+        const plugins = pluginLoader.getAll();
+        if (plugins.size === 0) {
+          return 'No plugins found. Add plugins to `~/.squirebot/plugins/` directory.';
+        }
+
+        const lines = ['**Plugins:**', ''];
+        for (const [name, info] of plugins) {
+          const statusIcon = {
+            loaded: '✅',
+            disabled: '⏸️',
+            error: '❌',
+            loading: '⏳',
+            not_found: '❓',
+          }[info.state] || '❓';
+
+          const version = info.plugin.version || '0.0.0';
+          const desc = info.plugin.description ? ` - ${info.plugin.description.slice(0, 50)}...` : '';
+          const errorMsg = info.error ? ` (${info.error})` : '';
+
+          lines.push(`${statusIcon} **${name}** v${version}${desc}${errorMsg}`);
+        }
+
+        lines.push('');
+        lines.push('Use `!plugins reload <name>` to hot-reload a plugin.');
+        lines.push('Use `!plugins reload all` to reload all plugins.');
+
+        return lines.join('\n');
+      }
+
+      if (subCommand === 'reload') {
+        if (!pluginName) {
+          return 'Please specify a plugin name or `all`. Usage: `!plugins reload <name|all>`';
+        }
+
+        if (pluginName === 'all') {
+          const results = await pluginLoader.reloadAll();
+          const succeeded = Array.from(results.values()).filter(p => p.state === 'loaded').length;
+          const failed = results.size - succeeded;
+          return `Reloaded ${succeeded} plugins successfully.${failed > 0 ? ` ${failed} failed.` : ''}`;
+        }
+
+        try {
+          const info = await pluginLoader.reload(pluginName);
+          if (info.state === 'loaded') {
+            return `Plugin **${pluginName}** reloaded successfully.`;
+          }
+          return `Failed to reload **${pluginName}**: ${info.error || 'Unknown error'}`;
+        } catch (error) {
+          return `Error reloading **${pluginName}**: ${error}`;
+        }
+      }
+
+      if (subCommand === 'enable') {
+        if (!pluginName) {
+          return 'Please specify a plugin name. Usage: `!plugins enable <name>`';
+        }
+
+        try {
+          const info = await pluginLoader.enable(pluginName);
+          if (info.state === 'loaded') {
+            return `Plugin **${pluginName}** enabled.`;
+          }
+          return `Failed to enable **${pluginName}**: ${info.error || 'Unknown error'}`;
+        } catch (error) {
+          return `Error enabling **${pluginName}**: ${error}`;
+        }
+      }
+
+      if (subCommand === 'disable') {
+        if (!pluginName) {
+          return 'Please specify a plugin name. Usage: `!plugins disable <name>`';
+        }
+
+        const success = await pluginLoader.disable(pluginName);
+        if (success) {
+          return `Plugin **${pluginName}** disabled.`;
+        }
+        return `Failed to disable **${pluginName}**. Plugin may not be loaded.`;
+      }
+
+      return [
+        '**Plugin Commands:**',
+        '• `!plugins` - List all plugins',
+        '• `!plugins reload <name|all>` - Hot reload plugin(s)',
+        '• `!plugins enable <name>` - Enable a plugin',
+        '• `!plugins disable <name>` - Disable a plugin',
+      ].join('\n');
+    },
+  },
 };
 
 /**
