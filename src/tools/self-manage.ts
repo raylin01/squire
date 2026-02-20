@@ -11,6 +11,7 @@ import { sendEmbed } from './communicate.js';
 interface SelfManageState {
   restart: () => Promise<void>;
   switchSDK: (provider: 'claude' | 'gemini' | 'codex') => Promise<void>;
+  switchModel: (model: string) => Promise<void>;
   updateConfig: (updates: Record<string, unknown>) => Promise<void>;
   reloadSkills: () => Promise<void>;
   getConfig: () => Record<string, unknown>;
@@ -91,6 +92,40 @@ defineTool(
       const message = error instanceof Error ? error.message : String(error);
       await sendEmbed('SDK Switch Failed', message, 'red');
       return `Failed to switch SDK: ${message}`;
+    }
+  }
+);
+
+// squire_switch_model - Switch AI model
+defineTool(
+  'squire_switch_model',
+  'Switch the AI model (e.g., claude-3-5-sonnet-20241022, gemini-exp-1206). The switch despawns active sessions so it takes effect immediately.',
+  {
+    model: {
+      type: 'string',
+      description: 'The model to switch to',
+    },
+  },
+  ['model'],
+  async (input: Record<string, unknown>) => {
+    if (!selfManageState) {
+      return 'Self-management not initialized';
+    }
+
+    const model = input.model as string;
+
+    try {
+      await selfManageState.switchModel(model);
+      await sendEmbed(
+        'Model Switched',
+        `Now using ${model} as the AI model`,
+        'green'
+      );
+      return `Successfully switched to model ${model}`;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await sendEmbed('Model Switch Failed', message, 'red');
+      return `Failed to switch model: ${message}`;
     }
   }
 );

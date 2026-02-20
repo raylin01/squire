@@ -512,11 +512,14 @@ const COMMANDS: Record<string, { handler: CommandHandler; help: string }> = {
   approve: {
     help: 'Approve a pending tool/command request',
     handler: async (ctx) => {
+      console.log(`[Commands] !approve triggered for workspace ${ctx.workspaceId}`);
       const pendingId = ctx.squire.getFirstPendingApprovalId(ctx.workspaceId);
       if (!pendingId) {
+        console.log(`[Commands] No pending approval found for workspace ${ctx.workspaceId}`);
         return 'No pending approval requests.';
       }
 
+      console.log(`[Commands] Approving request ${pendingId}`);
       await ctx.squire.respondToApproval(pendingId, true, ctx.workspaceId);
       return 'Approved.';
     },
@@ -525,13 +528,52 @@ const COMMANDS: Record<string, { handler: CommandHandler; help: string }> = {
   deny: {
     help: 'Deny a pending tool/command request',
     handler: async (ctx) => {
+      console.log(`[Commands] !deny triggered for workspace ${ctx.workspaceId}`);
       const pendingId = ctx.squire.getFirstPendingApprovalId(ctx.workspaceId);
       if (!pendingId) {
+        console.log(`[Commands] No pending approval found for workspace ${ctx.workspaceId}`);
         return 'No pending approval requests.';
       }
 
+      console.log(`[Commands] Denying request ${pendingId}`);
       await ctx.squire.respondToApproval(pendingId, false, ctx.workspaceId);
       return 'Denied.';
+    },
+  },
+
+  patterns: {
+    help: 'Manage learned command patterns. Usage: !patterns [clear|stats]',
+    handler: async (ctx, args) => {
+      const { getAllLearnedPatterns, clearLearnedPatterns, getLearnedPatternsStats } = await import('../../permissions/learned-patterns.js');
+
+      const subCommand = args[0]?.toLowerCase();
+
+      if (subCommand === 'clear') {
+        clearLearnedPatterns();
+        return 'Cleared all learned patterns.';
+      }
+
+      if (subCommand === 'stats') {
+        const stats = getLearnedPatternsStats();
+        return `Learned patterns: ${stats.count} patterns, ${stats.totalApprovals} total approvals.`;
+      }
+
+      // List all patterns
+      const patterns = getAllLearnedPatterns();
+      if (patterns.length === 0) {
+        return 'No learned patterns yet. Patterns are added when you approve commands with !approve.';
+      }
+
+      const lines = [`**Learned Patterns (${patterns.length}):**`, ''];
+      for (const p of patterns) {
+        const example = p.examples[0] ? ` (e.g., \`${p.examples[0].slice(0, 50)}${p.examples[0].length > 50 ? '...' : ''}\`)` : '';
+        lines.push(`- \`${p.base}\` - ${p.approvalCount} approvals${example}`);
+      }
+      lines.push('');
+      lines.push('Use `!patterns clear` to remove all patterns.');
+      lines.push('Use `!patterns stats` for summary.');
+
+      return lines.join('\n');
     },
   },
 };

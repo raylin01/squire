@@ -5,6 +5,7 @@
  */
 
 import type { TaskSchedule } from '../types.js';
+import { CronExpressionParser } from 'cron-parser';
 
 export interface ParsedSchedule {
   type: 'once' | 'interval' | 'cron';
@@ -72,36 +73,18 @@ function parseCronSchedule(expression: string, baseDate: Date): ParsedSchedule {
 }
 
 function calculateNextCronRun(expression: string, baseDate: Date): Date {
-  // TODO: Use proper cron library (cron-parser or node-cron)
-  // For MVP, parse simple patterns
-  const parts = expression.split(' ');
-  const minute = parts[0];
-  const hour = parts[1];
-
-  // Handle "every X minutes" pattern: */X * * * *
-  if (minute.startsWith('*/')) {
-    const interval = parseInt(minute.slice(2), 10);
-    if (!isNaN(interval)) {
-      return new Date(baseDate.getTime() + interval * 60 * 1000);
-    }
+  try {
+    const interval = CronExpressionParser.parse(expression, { 
+      currentDate: baseDate,
+      tz: 'UTC'
+    });
+    return interval.next().toDate();
+  } catch (error) {
+    console.warn(`[Scheduler] Failed to parse cron expression "${expression}":`, error);
+    // Fallback if parsing fails to prevent complete crash
+    console.warn('[Scheduler] Defaulting to 1 hour from now due to parse failure');
+    return new Date(baseDate.getTime() + 60 * 60 * 1000);
   }
-
-  // Handle "every hour at minute X": X * * * *
-  if (minute !== '*' && hour === '*') {
-    const targetMinute = parseInt(minute, 10);
-    if (!isNaN(targetMinute)) {
-      const next = new Date(baseDate);
-      next.setMinutes(targetMinute, 0, 0);
-      if (next <= baseDate) {
-        next.setHours(next.getHours() + 1);
-      }
-      return next;
-    }
-  }
-
-  // Default: 1 hour from now
-  console.warn('[Scheduler] Cron parsing limited, defaulting to 1 hour');
-  return new Date(baseDate.getTime() + 60 * 60 * 1000);
 }
 
 export function calculateNextRun(

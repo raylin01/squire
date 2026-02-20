@@ -28,6 +28,7 @@ import type {
   SDKProvider,
 } from './types.js';
 import { resolveConfig, ensureSquireDir } from './config.js';
+import { calculateNextRun } from './scheduler/parser.js';
 import { HybridMemoryManager, createHybridMemoryManager } from './memory/index.js';
 import type { MemoryAddOptions, CoreMemoryType } from './memory/types.js';
 import { SkillManager, createSkillManager } from './skills/index.js';
@@ -36,6 +37,7 @@ import { TicketManager, createTicketManager } from './tickets/index.js';
 import { PersonalityManager, createPersonalityManager } from './personality/index.js';
 import { toolRegistry, setCommunicationHandler, communicate, setSelfManageState, setMemoryManager as setToolMemoryManager, setScheduler as setToolScheduler, setTicketManager as setToolTicketManager, setSquireInstance, setExecutionContext, clearExecutionContext, getExecutionContext } from './tools/index.js';
 import { checkBashPermission, checkToolPermission } from './permissions/index.js';
+import { addLearnedPattern } from './permissions/learned-patterns.js';
 import { WorkspaceSession } from './workspace-session.js';
 
 /**
@@ -47,6 +49,9 @@ export class Squire extends EventEmitter {
   private workspaceSessions: Map<string, WorkspaceSession> = new Map();
   private activeWorkspaceId: string | null = null;
   private running: boolean = false;
+
+  // Pending approvals (requestId -> approval info for learned patterns)
+  private pendingApprovals: Map<string, { toolName: string; toolInput: Record<string, unknown> }> = new Map();
 
   // Subsystems
   private memoryManager: HybridMemoryManager | null = null;
@@ -96,6 +101,9 @@ export class Squire extends EventEmitter {
       },
       switchSDK: async (provider: SDKProvider) => {
         await this.switchSDK(provider);
+      },
+      switchModel: async (model: string) => {
+        await this.switchModel(model);
       },
       updateConfig: async (updates: Record<string, unknown>) => {
         this.config = { ...this.config, ...updates } as SquireConfig;
@@ -286,11 +294,37 @@ export class Squire extends EventEmitter {
   }
 
   /**
-   * Switch to a different SDK provider (affects new sessions)
+   * Switch to a different SDK provider (despawns active sessions)
    */
   async switchSDK(provider: SDKProvider): Promise<void> {
+    if (this.config.sdk.provider === provider) {
+      return;
+    }
     this.config.sdk.provider = provider;
-    console.log(`[Squire] SDK provider changed to ${provider} (affects new workspace sessions)`);
+    console.log(`[Squire] SDK provider changed to ${provider}, despawning active sessions...`);
+    
+    // Despawn active sessions
+    for (const [workspaceId, session] of this.workspaceSessions) {
+      await session.stop();
+    }
+    this.workspaceSessions.clear();
+  }
+
+  /**
+   * Switch to a different model (despawns active sessions)
+   */
+  async switchModel(model: string): Promise<void> {
+    if (this.config.sdk.model === model || (!this.config.sdk.model && this.config.model === model)) {
+      return;
+    }
+    this.config.sdk.model = model;
+    console.log(`[Squire] Model changed to ${model}, despawning active sessions...`);
+
+    // Despawn active sessions
+    for (const [workspaceId, session] of this.workspaceSessions) {
+      await session.stop();
+    }
+    this.workspaceSessions.clear();
   }
 
   /**
@@ -980,6 +1014,12 @@ export class Squire extends EventEmitter {
       return;
     }
 
+    // Store pending approval info for later pattern recording
+    this.pendingApprovals.set(event.requestId, {
+      toolName: event.toolName,
+      toolInput: event.toolInput,
+    });
+
     // Emit approval event for external handling (e.g., Discord, CLI)
     this.emitEvent('approval_required', {
       requestId: event.requestId,
@@ -1020,14 +1060,38 @@ export class Squire extends EventEmitter {
    * Respond to an approval request
    */
   async respondToApproval(requestId: string, approved: boolean, workspaceId?: string, updatedInput?: Record<string, unknown>): Promise<void> {
+    console.log(`[Squire] respondToApproval called: requestId=${requestId}, approved=${approved}, workspaceId=${workspaceId}`);
     // Find the session that has this approval pending
     const targetWorkspaceId = workspaceId || this.activeWorkspaceId;
-    if (!targetWorkspaceId) return;
+    if (!targetWorkspaceId) {
+      console.log(`[Squire] respondToApproval failed: no target workspace ID`);
+      return;
+    }
 
     const session = this.workspaceSessions.get(targetWorkspaceId);
-    if (!session) return;
+    if (!session) {
+      console.log(`[Squire] respondToApproval failed: no session for workspace ${targetWorkspaceId}`);
+      return;
+    }
+
+    // If approved, record the pattern for future auto-approval
+    if (approved) {
+      const pendingInfo = this.pendingApprovals.get(requestId);
+      if (pendingInfo) {
+        // Record learned pattern for Bash commands
+        if (pendingInfo.toolName === 'Bash' && pendingInfo.toolInput.command) {
+          const command = pendingInfo.toolInput.command as string;
+          addLearnedPattern(command);
+        }
+        this.pendingApprovals.delete(requestId);
+      }
+    } else {
+      // Clean up on deny too
+      this.pendingApprovals.delete(requestId);
+    }
 
     await session.sendApproval(requestId, approved ? 'allow' : 'deny', updatedInput);
+    this.updateActivity('working');
   }
 
   /**
@@ -1141,11 +1205,15 @@ export class Squire extends EventEmitter {
       // Set as active workspace
       this.setActiveWorkspace(task.workspaceId);
 
-      // TODO: Actually execute the task using the AI
-      // For now, just return success
+      // Send a system message to the workspace to trigger the AI
+      const systemPrompt = `[System] Scheduled Task Triggered: ${task.description}\n\nPlease execute this task now.`;
+
+      // Use the existing sendMessage infrastructure which handles context and session management
+      await this.sendMessage(task.workspaceId, systemPrompt);
+
       return {
         success: true,
-        output: `Executed: ${task.description}`,
+        output: `Triggered AI execution for: ${task.description}`,
         completedAt: new Date().toISOString(),
       };
     } catch (error) {
@@ -1279,18 +1347,12 @@ export class Squire extends EventEmitter {
   }
 
   private calculateNextRun(schedule: TaskSchedule): string {
-    const now = Date.now();
-
-    switch (schedule.type) {
-      case 'once':
-        return new Date(schedule.value as number).toISOString();
-      case 'interval':
-        return new Date(now + (schedule.value as number)).toISOString();
-      case 'cron':
-        // TODO: Parse cron expression
-        return new Date(now + 60000).toISOString();
-      default:
-        return new Date(now + 60000).toISOString();
+    const now = new Date();
+    try {
+      return calculateNextRun(schedule, now).toISOString();
+    } catch (error) {
+      console.error('[Squire] Error calculating next run:', error);
+      return new Date(now.getTime() + 60000).toISOString();
     }
   }
 }

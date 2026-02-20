@@ -239,7 +239,7 @@ class DiscordCommunicator {
   async sendText(workspaceId: string, content: string, isComplete: boolean = true): Promise<void> {
     const channel = this.channelMap.get(workspaceId);
     if (!channel) {
-      console.warn(`[Communicator] No channel for workspace ${workspaceId}, registered channels: ${Array.from(this.channelMap.keys()).join(', ')}`);
+      console.warn(`[Communicator] No channel for workspace ${workspaceId}`);
       return;
     }
 
@@ -260,9 +260,11 @@ class DiscordCommunicator {
         await existingMessage.edit(trimmedContent);
         return;
       } catch (error) {
-        // If edit fails (message deleted, etc.), create new
-        console.warn('[Communicator] Failed to edit message, creating new:', error);
+        // If edit fails (message deleted, etc.), clear state and fall through to create new
+        console.warn('[Communicator] Failed to edit, creating new:', error);
         this.streamingMessages.delete(workspaceId);
+        this.lastStreamContent.delete(workspaceId);
+        // Fall through to create new message below
       }
     }
 
@@ -416,20 +418,24 @@ async function main(): Promise<void> {
       | 'gemini'
       | 'codex'
       | undefined;
+    const squireModel = args.find(a => a.startsWith('--model='))?.split('=')[1];
 
     if (!token || !appId) {
-      console.error('Usage: squire-bot init --token=YOUR_DISCORD_BOT_TOKEN --app-id=YOUR_APP_ID [--provider=claude|gemini|codex]');
+      console.error('Usage: squire-bot init --token=YOUR_DISCORD_BOT_TOKEN --app-id=YOUR_APP_ID [--provider=claude|gemini|codex] [--model=MODEL_NAME]');
       process.exit(1);
     }
 
     const config = createDefaultConfig(token, appId);
     if (squireProvider) {
-      config.squire = { provider: squireProvider };
+      config.squire = { ...config.squire, provider: squireProvider };
+    }
+    if (squireModel) {
+      config.squire = { ...config.squire, model: squireModel };
     }
 
     saveConfig(config);
     console.log(`[SquireBot] Config created at ${getConfigPath()}`);
-    console.log(`[SquireBot] Provider: ${config.squire?.provider || 'claude'}`);
+    console.log(`[SquireBot] Provider: ${config.squire?.provider || 'gemini'}`);
     process.exit(0);
   }
 
@@ -448,6 +454,33 @@ async function main(): Promise<void> {
   }
   if (process.env.DISCORD_APP_ID) {
     config = { ...config, discordAppId: process.env.DISCORD_APP_ID };
+  }
+  if (process.env.SQUIRE_SDK_PROVIDER) {
+    config = {
+      ...config,
+      squire: {
+        ...config.squire,
+        provider: process.env.SQUIRE_SDK_PROVIDER as 'claude' | 'gemini' | 'codex',
+      },
+    };
+  }
+  if (process.env.SQUIRE_SDK_MODEL) {
+    config = {
+      ...config,
+      squire: {
+        ...config.squire,
+        model: process.env.SQUIRE_SDK_MODEL,
+      },
+    };
+  }
+  if (process.env.SQUIRE_PERMISSION_MODE) {
+    config = {
+      ...config,
+      squire: {
+        ...config.squire,
+        permissionMode: process.env.SQUIRE_PERMISSION_MODE as 'strict' | 'autoSafe' | 'permissive',
+      },
+    };
   }
 
   // Determine safe mode (CLI flag overrides config)
@@ -478,12 +511,13 @@ async function main(): Promise<void> {
     squireId: `squire-${Date.now()}`,
     name: config.name || 'Squire',
     sdk: {
-      provider: (config.squire?.provider || 'claude') as 'claude' | 'gemini' | 'codex',
+      provider: (config.squire?.provider || 'gemini') as 'claude' | 'gemini' | 'codex',
+      model: config.squire?.model,
       cliPath: config.squire?.cliPath,
       resumeSessionId: config.resumeSessionId,
     },
     permissions: {
-      mode: 'autoSafe' as const,
+      mode: (config.squire?.permissionMode || 'autoSafe') as 'strict' | 'autoSafe' | 'permissive',
       allowedTools: [],
       blockedTools: [],
     },
@@ -515,9 +549,16 @@ async function main(): Promise<void> {
   // Handle Squire communication events
   squire.on('communication', async (event: any) => {
     const data = event.data;
+    console.log(`[Communication] Event received:`, JSON.stringify(data));
+
     // Find which workspace this came from
     const workspaceId = data.workspaceId as string | undefined;
-    if (!workspaceId) return;
+    if (!workspaceId) {
+      console.warn('[Communication] No workspaceId, cannot send message');
+      return;
+    }
+
+    console.log(`[Communication] Sending to workspace ${workspaceId.slice(0, 8)}...`);
 
     if (data.type === 'text') {
       await communicator.sendText(workspaceId, data.content as string);
@@ -579,6 +620,23 @@ async function main(): Promise<void> {
       status: discordStatus,
     });
   });
+// Global maps for tracking prefix lengths to avoid duplication when breaking into multiple messages
+const stdoutPrefixLengths = new Map<string, number>();
+const thinkingPrefixLengths = new Map<string, number>();
+const lastStdoutContents = new Map<string, string>();
+const lastThinkingContents = new Map<string, string>();
+
+function clearSessionPrefixes(workspaceId: string) {
+  stdoutPrefixLengths.delete(workspaceId);
+  thinkingPrefixLengths.delete(workspaceId);
+  lastStdoutContents.delete(workspaceId);
+  lastThinkingContents.delete(workspaceId);
+}
+
+function updateSessionPrefixes(workspaceId: string) {
+  stdoutPrefixLengths.set(workspaceId, lastStdoutContents.get(workspaceId)?.length || 0);
+  thinkingPrefixLengths.set(workspaceId, lastThinkingContents.get(workspaceId)?.length || 0);
+}
 
   // Handle SDK output events - stream messages to Discord
   squire.on('output', async (event: any) => {
@@ -588,18 +646,36 @@ async function main(): Promise<void> {
     const outputType = data.outputType as string;
     const isComplete = data.isComplete as boolean;
 
-    // Handle both stdout and thinking output
-    if ((outputType === 'stdout' || outputType === 'thinking') && content && content.trim() && workspaceId) {
-      // Check if output type changed - creates new message on transitions
-      communicator.checkOutputTypeChange(workspaceId, outputType);
+    if (!workspaceId) return;
 
-      // Strip any tool blocks from output before sending to Discord
-      let cleanContent = content.replace(/```squire-tool\n[\s\S]*?```/g, '').trim();
-
-      // Send content (will edit existing message during streaming, new message if type changed)
-      if (cleanContent) {
-        await communicator.sendText(workspaceId, cleanContent, isComplete);
+    if (communicator.checkOutputTypeChange(workspaceId, outputType)) {
+      // Type changed. Save the prefix for the new type to avoid repeating old text.
+      if (outputType === 'stdout') {
+        stdoutPrefixLengths.set(workspaceId, lastStdoutContents.get(workspaceId)?.length || 0);
+      } else if (outputType === 'thinking') {
+        thinkingPrefixLengths.set(workspaceId, lastThinkingContents.get(workspaceId)?.length || 0);
       }
+    }
+
+    let displayContent = content;
+    const isCurrentlyStreaming = (communicator as any).streamingMessages?.has(workspaceId);
+
+    if (outputType === 'stdout') {
+      lastStdoutContents.set(workspaceId, content);
+      const prefixLen = stdoutPrefixLengths.get(workspaceId) || 0;
+      displayContent = content.slice(prefixLen);
+
+      let cleanContent = displayContent.replace(/```squire-tool\n[\s\S]*?```/g, '').trim();
+
+      // Send during streaming OR when complete to close it out.
+      // If complete but no new content, we still send to perform the final edit if we were streaming.
+      if (cleanContent || (isComplete && isCurrentlyStreaming)) {
+        await communicator.sendText(workspaceId, cleanContent || '...', isComplete);
+      }
+    } else if (outputType === 'thinking') {
+      lastThinkingContents.set(workspaceId, content);
+      // We no longer send thinking blocks to Discord,
+      // but breaking the stream state still happens via checkOutputTypeChange().
     }
   });
 
@@ -607,8 +683,8 @@ async function main(): Promise<void> {
   squire.on('tool_use', async (event: any) => {
     const workspaceId = event.data?.workspaceId as string | undefined;
     if (workspaceId) {
-      // Clear streaming state so next output creates a new message
       communicator.clearStreamingState(workspaceId);
+      updateSessionPrefixes(workspaceId);
     }
   });
 
@@ -617,9 +693,9 @@ async function main(): Promise<void> {
     const data = event.data;
     const workspaceId = data.workspaceId as string | undefined;
     console.log(`[Squire] Session complete for workspace: ${workspaceId}`);
-    // Clear streaming state when session completes
     if (workspaceId) {
       communicator.clearStreamingState(workspaceId);
+      clearSessionPrefixes(workspaceId);
     }
   });
 
@@ -628,10 +704,15 @@ async function main(): Promise<void> {
     const data = event.data;
     console.log(`[Squire] Approval required: ${data.toolName}`);
 
+    const workspaceId = data.workspaceId as string | undefined;
+
+    if (workspaceId) {
+      communicator.clearStreamingState(workspaceId);
+      updateSessionPrefixes(workspaceId);
+    }
+
     // Handle AskUserQuestion specially - present UI in Discord
     if (data.toolName === 'AskUserQuestion') {
-      // Get workspace from event
-      const workspaceId = data.workspaceId as string | undefined;
       if (!workspaceId) {
         console.error('[Squire] AskUserQuestion missing workspaceId');
         await squire.respondToApproval(data.requestId, false);
@@ -648,7 +729,6 @@ async function main(): Promise<void> {
     }
 
     // Handle general tool approvals - show prompt in Discord
-    const workspaceId = data.workspaceId as string | undefined;
     if (workspaceId) {
       const channel = communicator.getChannel(workspaceId);
       if (channel) {
@@ -849,6 +929,9 @@ function setupMessageHandler(
       // Also register for AskUserQuestion handling
       registerQuestionChannel(workspaceId, message.channel as TextChannel);
     }
+
+    // Clear streaming state for new user message (creates fresh message for response)
+    communicator.clearStreamingState(workspaceId);
 
     // Send to Squire
     try {

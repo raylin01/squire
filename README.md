@@ -47,7 +47,7 @@ Create a Discord bot at [Discord Developer Portal](https://discord.com/developer
 bun run bot init \
   --token=YOUR_DISCORD_BOT_TOKEN \
   --app-id=YOUR_DISCORD_APP_ID \
-  --provider=claude
+  --provider=gemini
 ```
 
 This creates `~/.squirebot/config.json` with your settings.
@@ -100,7 +100,8 @@ Config file: `~/.squirebot/config.json`
   "discordToken": "your-bot-token",
   "discordAppId": "your-app-id",
   "squire": {
-    "provider": "claude",
+    "provider": "gemini",
+    "model": "gemini-2.5-pro",
     "permissionMode": "autoSafe"
   },
   "plugins": {

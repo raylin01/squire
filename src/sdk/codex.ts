@@ -84,6 +84,12 @@ export class CodexSDKClient extends BaseSDKClient {
     });
 
     this.client.on('command_approval', (event: any) => {
+      this.approvalTracker.add(event.requestId, {
+        requestId: event.requestId,
+        toolName: 'bash',
+        input: { command: event.command },
+        createdAt: Date.now(),
+      });
       this.emit('approval', {
         requestId: event.requestId,
         toolName: 'bash',
@@ -93,6 +99,12 @@ export class CodexSDKClient extends BaseSDKClient {
     });
 
     this.client.on('file_approval', (event: any) => {
+      this.approvalTracker.add(event.requestId, {
+        requestId: event.requestId,
+        toolName: 'file_' + event.operation,
+        input: { path: event.path },
+        createdAt: Date.now(),
+      });
       this.emit('approval', {
         requestId: event.requestId,
         toolName: 'file_' + event.operation,
@@ -158,6 +170,8 @@ export class CodexSDKClient extends BaseSDKClient {
       } else {
         await this.client.deny(requestId);
       }
+
+      this.approvalTracker.delete(requestId);
 
       if (!this.hasPendingApprovals()) {
         this.setStatus('working');

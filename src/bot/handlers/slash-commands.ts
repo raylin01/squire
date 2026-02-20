@@ -340,6 +340,7 @@ async function handleConfig(
         `• Squire ID: ${config.squireId}\n` +
         `• Name: ${config.name}\n` +
         `• Provider: ${config.sdk.provider}\n` +
+        `• Model: ${config.sdk.model || '(provider default)'}\n` +
         `• Permission Mode: ${config.permissions.mode}\n` +
         `• Memory: ${config.memory.enabled ? 'Enabled' : 'Disabled'}`
       );

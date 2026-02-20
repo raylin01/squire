@@ -13,6 +13,7 @@ import {
 import type { Client } from 'discord.js';
 import type { Squire } from '../../index.js';
 import { registerQuestionChannel } from './questions.js';
+import { handleCommand } from './commands.js';
 
 interface WorkspaceManager {
   getOrCreateWorkspace(channelId: string, channelName: string, source: 'discord_dm' | 'discord_channel' | 'discord_forum'): Promise<string>;
@@ -77,6 +78,10 @@ export function setupDmHandler(
     if (!message.channel.partial) {
       registerQuestionChannel(workspaceId, message.channel);
     }
+
+    // Regular commands (e.g. !approve)
+    const commandHandled = await handleCommand(message, squire, workspaceId);
+    if (commandHandled) return;
 
     // Send to Squire
     try {

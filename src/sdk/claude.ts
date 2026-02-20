@@ -16,13 +16,7 @@ import {
 } from './types.js';
 import { shouldAutoApproveInSafeMode, getDangerousReason } from '../permissions/safe-tools.js';
 
-interface ClaudePendingApproval {
-  requestId: string;
-  toolName: string;
-  input: Record<string, unknown>;
-  toolUseId: string;
-  createdAt: number;
-}
+
 
 /**
  * Claude SDK Client
@@ -32,7 +26,6 @@ interface ClaudePendingApproval {
  */
 export class ClaudeSDKClient extends BaseSDKClient {
   readonly provider = 'claude';
-  private pendingApprovals = new PendingApprovalTracker<ClaudePendingApproval>();
   private client: any = null;
 
   constructor(config: SDKConfig) {
@@ -87,14 +80,15 @@ export class ClaudeSDKClient extends BaseSDKClient {
       });
     });
 
-    // text_delta: incremental assistant text output
-    this.client.on('text_delta', (text: string) => {
-      this.appendOutput(text, false);  // Use append for incremental
+    // text_accumulated: full accumulated assistant text output
+    // Using accumulated mode (like DisCode) for reliable streaming
+    this.client.on('text_accumulated', (accumulatedText: string) => {
+      this.outputThrottler.addStdout(accumulatedText);
     });
 
-    // thinking_delta: incremental thinking output
-    this.client.on('thinking_delta', (text: string) => {
-      this.appendThinkingDelta(text, false);  // Use append for incremental
+    // thinking_accumulated: full accumulated thinking output
+    this.client.on('thinking_accumulated', (accumulatedThinking: string) => {
+      this.outputThrottler.addThinking(accumulatedThinking);
     });
 
     // message: full assistant message object (for tool_use events)
@@ -142,7 +136,7 @@ export class ClaudeSDKClient extends BaseSDKClient {
         }
 
         // Add to pending approvals and emit event
-        this.pendingApprovals.add(approvalId, {
+        this.approvalTracker.add(approvalId, {
           requestId: approvalId,
           toolName,
           input,
@@ -212,9 +206,13 @@ export class ClaudeSDKClient extends BaseSDKClient {
     decision: 'allow' | 'deny',
     updatedInput?: Record<string, unknown>
   ): Promise<void> {
-    if (!this.client) return;
+    console.log(`[ClaudeSDK] sendApproval called: requestId=${requestId}, decision=${decision}`);
+    if (!this.client) {
+      console.warn(`[ClaudeSDK] sendApproval failed: client not initialized`);
+      return;
+    }
 
-    const pending = this.pendingApprovals.get(requestId);
+    const pending = this.approvalTracker.get(requestId);
     if (!pending) {
       console.warn(`[ClaudeSDK] No pending approval for ${requestId}`);
       return;
@@ -226,9 +224,9 @@ export class ClaudeSDKClient extends BaseSDKClient {
         : { behavior: 'deny', message: 'Denied by user' };
 
       await this.client.sendControlResponse(requestId, responseData);
-      this.pendingApprovals.delete(requestId);
+      this.approvalTracker.delete(requestId);
 
-      if (this.pendingApprovals.size() === 0) {
+      if (this.approvalTracker.size() === 0) {
         this.setStatus('working');
       }
     } catch (error) {

@@ -38,7 +38,7 @@ const DEFAULT_CONFIG: Omit<SquireConfig, 'squireId'> = {
   memoryDbPath: path.join(DATA_DIR, 'memory.db'),
   skillsDir: path.join(DATA_DIR, 'skills'),
   sdk: {
-    provider: 'claude',
+    provider: 'gemini',
   },
   daemonMode: false,
   pollInterval: 60000,
@@ -318,7 +318,7 @@ export function mergeEnvConfig(config: SquireConfig): SquireConfig {
   if (process.env.SQUIRE_SDK_MODEL) {
     envConfig.sdk = {
       ...(config.sdk || {}),
-      provider: config.sdk?.provider || 'claude',
+      provider: config.sdk?.provider || 'gemini',
       model: process.env.SQUIRE_SDK_MODEL,
     };
   }

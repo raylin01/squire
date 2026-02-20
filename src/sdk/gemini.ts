@@ -12,7 +12,6 @@ import {
   SDKMessage,
   SDKToolResult,
   ToolUseEvent,
-  ApprovalEvent,
 } from './types.js';
 
 /**
@@ -32,6 +31,7 @@ export class GeminiSDKClient extends BaseSDKClient {
   async start(): Promise<void> {
     try {
       const { GeminiClient } = await import('@raylin01/gemini-client');
+      const approvalMode = this.getApprovalMode();
 
       this.client = new GeminiClient({
         cwd: this.config.cwd || process.cwd(),
@@ -40,7 +40,9 @@ export class GeminiSDKClient extends BaseSDKClient {
           ...process.env,
           ...this.config.env,
         },
-        // Note: model and mcpServers may not be supported by all client versions
+        model: this.config.model,
+        outputFormat: 'json',
+        approvalMode,
       });
 
       this.setupEventListeners();
@@ -55,47 +57,52 @@ export class GeminiSDKClient extends BaseSDKClient {
     }
   }
 
+  private getApprovalMode(): 'default' | 'auto_edit' | 'yolo' {
+    switch (this.config.permissionMode) {
+      case 'permissive':
+        return 'yolo';
+      case 'autoSafe':
+        return 'auto_edit';
+      case 'strict':
+      default:
+        return 'default';
+    }
+  }
+
   private setupEventListeners(): void {
     if (!this.client) return;
 
     // Map client events to our unified interface
-    this.client.on('content', (content: string) => {
-      this.emitOutput(content, false, 'stdout');
+    this.client.on('ready', (sessionId: string) => {
+      this.emit('metadata', {
+        sessionId,
+        model: this.config.model,
+      });
+      this.config.resumeSessionId = sessionId;
     });
 
-    this.client.on('thinking', (thinking: string) => {
-      this.emitThinking(thinking, false);
+    this.client.on('message_delta', (delta: string) => {
+      this.appendOutput(delta, false);
     });
 
     this.client.on('tool_use', (event: any) => {
       this.emit('tool_use', {
-        toolName: event.name,
-        toolId: event.id,
-        input: event.input,
+        toolName: event.tool_name,
+        toolId: event.tool_id,
+        input: event.parameters,
       } as ToolUseEvent);
     });
 
     this.client.on('tool_result', (event: any) => {
       this.emit('tool_result', {
-        toolUseId: event.toolUseId,
-        content: event.content,
-        isError: event.isError,
+        toolUseId: event.tool_id,
+        content: event.output,
+        isError: event.status === 'error',
       });
     });
 
-    this.client.on('approval', (event: any) => {
-      this.emit('approval', {
-        requestId: event.requestId,
-        toolName: event.toolName,
-        toolInput: event.input,
-      } as ApprovalEvent);
-      this.setStatus('waiting');
-    });
-
-    this.client.on('complete', () => {
-      this.setStatus('idle');
-      this.outputThrottler.flush(true);
-      this.emit('complete');
+    this.client.on('error_event', (event: any) => {
+      this.emitError(new Error(event.message));
     });
 
     this.client.on('error', (error: Error) => {
@@ -115,15 +122,70 @@ export class GeminiSDKClient extends BaseSDKClient {
     this.setStatus('working');
 
     try {
-      await this.client.sendMessage(message.content);
+      const result = await this.client.sendMessage(message.content);
+
+      if (result.status === 'error') {
+        const errMsg = result.error?.message || result.stderr || 'Gemini CLI failed without an explicit error message.';
+        throw new Error(errMsg);
+      }
+
+      if (result.sessionId && result.sessionId !== this.config.resumeSessionId) {
+        this.config.resumeSessionId = result.sessionId;
+        this.emit('metadata', { sessionId: result.sessionId, model: this.config.model });
+      }
+
+      const responseText = this.extractResponseText(result);
+      if (responseText) {
+        this.emitOutput(responseText, true, 'stdout');
+      }
+
+      // Ensure we clean up state whenever the process finishes
+      this.setStatus('idle');
+      this.emit('complete');
     } catch (error) {
       this.emitError(error instanceof Error ? error : new Error(String(error)));
       throw error;
     }
   }
 
+  private extractResponseText(result: any): string {
+    if (typeof result?.assistantResponse === 'string' && result.assistantResponse.trim()) {
+      return result.assistantResponse.trim();
+    }
+
+    const stdout = Array.isArray(result?.stdout) ? result.stdout : [];
+    if (stdout.length === 0) {
+      return '';
+    }
+
+    const joined = stdout.join('\n').trim();
+    if (!joined) {
+      return '';
+    }
+
+    // Newer Gemini CLI outputs JSON in non-stream mode.
+    try {
+      const parsed = JSON.parse(joined);
+      const direct = parsed?.response || parsed?.text || parsed?.output || parsed?.content;
+      if (typeof direct === 'string' && direct.trim()) {
+        return direct.trim();
+      }
+    } catch {
+      // Fall back to raw text below.
+    }
+
+    return joined;
+  }
+
   async sendToolResult(result: SDKToolResult): Promise<void> {
     if (!this.client) return;
+
+    if (typeof this.client.sendToolResult !== 'function') {
+      if (this.config.debug) {
+        console.warn('[GeminiSDK] sendToolResult not supported by @raylin01/gemini-client, ignoring.');
+      }
+      return;
+    }
 
     try {
       await this.client.sendToolResult({
@@ -143,12 +205,24 @@ export class GeminiSDKClient extends BaseSDKClient {
   ): Promise<void> {
     if (!this.client) return;
 
+    if (
+      typeof this.client.approve !== 'function' ||
+      typeof this.client.deny !== 'function'
+    ) {
+      if (this.config.debug) {
+        console.warn('[GeminiSDK] Approval API not supported by @raylin01/gemini-client, ignoring.');
+      }
+      return;
+    }
+
     try {
       if (decision === 'allow') {
         await this.client.approve(requestId);
       } else {
         await this.client.deny(requestId);
       }
+
+      this.approvalTracker.delete(requestId);
 
       if (!this.hasPendingApprovals()) {
         this.setStatus('working');

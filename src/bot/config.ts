@@ -111,7 +111,7 @@ export function createDefaultConfig(
     discordToken,
     discordAppId,
     squire: {
-      provider: 'claude',
+      provider: 'gemini',
       permissionMode: 'autoSafe',
     },
     plugins: {

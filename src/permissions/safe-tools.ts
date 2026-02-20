@@ -10,6 +10,8 @@
  * - permissive: No approval required (dangerous mode)
  */
 
+import { matchesLearnedPattern } from './learned-patterns.js';
+
 // ============================================================================
 // Safe Patterns - Always auto-approved
 // ============================================================================
@@ -182,14 +184,7 @@ export function checkBashPermission(
     return null;
   }
 
-  // Check safe patterns first - auto-approve if matched
-  for (const pattern of SAFE_PATTERNS) {
-    if (pattern.test(command)) {
-      return null;  // Auto-approve safe commands
-    }
-  }
-
-  // Check always dangerous patterns
+  // Check always dangerous patterns FIRST (take precedence over safe patterns)
   for (const { pattern, reason } of ALWAYS_DANGEROUS_PATTERNS) {
     if (pattern.test(command)) {
       return reason;
@@ -205,8 +200,20 @@ export function checkBashPermission(
     }
   }
 
-  // Auto-approve
-  return null;
+  // Check safe patterns - auto-approve if matched
+  for (const pattern of SAFE_PATTERNS) {
+    if (pattern.test(command)) {
+      return null;  // Auto-approve safe commands
+    }
+  }
+
+  // Check learned patterns - auto-approve if user has approved before
+  if (matchesLearnedPattern(command)) {
+    return null;  // Auto-approve learned commands
+  }
+
+  // Default: require approval for unknown commands (secure by default)
+  return 'Command not in safe list';
 }
 
 /**
@@ -361,6 +368,11 @@ export function shouldAutoApproveInSafeMode(
       if (pattern.test(command)) {
         return true;
       }
+    }
+
+    // Check learned patterns - auto-approve if user has approved before
+    if (matchesLearnedPattern(command)) {
+      return true;
     }
 
     // Default to requiring approval for unknown Bash commands
