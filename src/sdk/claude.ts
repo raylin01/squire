@@ -27,6 +27,7 @@ import { shouldAutoApproveInSafeMode, getDangerousReason } from '../permissions/
 export class ClaudeSDKClient extends BaseSDKClient {
   readonly provider = 'claude';
   private client: any = null;
+  private emittedToolUseIds = new Set<string>();
 
   constructor(config: SDKConfig) {
     super(config);
@@ -91,10 +92,36 @@ export class ClaudeSDKClient extends BaseSDKClient {
       this.outputThrottler.addThinking(accumulatedThinking);
     });
 
+    // Stream-level tool boundary (fires as soon as tool block is parsed)
+    this.client.on('tool_use_start', (tool: any) => {
+      // Flush any buffered text/thinking first so tool boundary ordering is preserved.
+      this.outputThrottler.flush(false);
+      const toolId = String(tool?.id || '');
+      const toolName = String(tool?.name || 'unknown');
+      if (!toolId || this.emittedToolUseIds.has(toolId)) {
+        return;
+      }
+      this.emittedToolUseIds.add(toolId);
+      this.emit('tool_use', {
+        toolName,
+        toolId,
+        input: (tool?.input || {}) as Record<string, unknown>,
+      } as ToolUseEvent);
+    });
+
     // message: full assistant message object (for tool_use events)
     this.client.on('message', (msg: any) => {
       for (const block of msg?.content || []) {
         if (block.type === 'tool_use') {
+          // Flush any buffered text/thinking first so tool boundary ordering is preserved.
+          this.outputThrottler.flush(false);
+          const toolId = String(block.id || '');
+          if (toolId && this.emittedToolUseIds.has(toolId)) {
+            continue;
+          }
+          if (toolId) {
+            this.emittedToolUseIds.add(toolId);
+          }
           this.emit('tool_use', {
             toolName: block.name,
             toolId: block.id,
@@ -156,6 +183,7 @@ export class ClaudeSDKClient extends BaseSDKClient {
     });
 
     this.client.on('result', () => {
+      this.emittedToolUseIds.clear();
       this.setStatus('idle');
       this.outputThrottler.flush(true);
       this.emit('complete');

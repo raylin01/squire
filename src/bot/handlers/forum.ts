@@ -20,6 +20,7 @@ interface WorkspaceManager {
 
 interface DiscordCommunicator {
   registerChannel(workspaceId: string, channel: any): void;
+  clearStreamingState(workspaceId: string): void;
 }
 
 export function setupForumHandler(
@@ -73,6 +74,7 @@ export function setupForumHandler(
 
     // Register thread for responses
     communicator.registerChannel(workspaceId, thread);
+    communicator.clearStreamingState(workspaceId);
 
     // Send to Squire with context
     const contextMessage = `New forum post: "${thread.name}"\n\n${content}`;
@@ -110,6 +112,7 @@ export function setupForumHandler(
 
     // Register thread for responses
     communicator.registerChannel(workspaceId, thread);
+    communicator.clearStreamingState(workspaceId);
 
     // Send to Squire
     try {

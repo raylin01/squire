@@ -13,12 +13,9 @@ import {
   Events,
   ActivityType,
   EmbedBuilder,
-  AttachmentBuilder,
   ChannelType,
   Message,
   TextChannel,
-  DMChannel,
-  ThreadChannel,
 } from 'discord.js';
 import { Squire, createSquire } from './index.js';
 import type { WorkspaceSource } from './index.js';
@@ -37,6 +34,8 @@ import {
 } from './bot/handlers/slash-commands.js';
 import { PluginLoader, createPluginLoader, setPluginLoader } from './bot/plugins/index.js';
 import type { PluginInfo } from './bot/plugins/index.js';
+import { DiscordCommunicator } from './bot/discord-communicator.js';
+import { DiscordOutputRouter } from './bot/output-router.js';
 import path from 'path';
 
 /**
@@ -137,269 +136,6 @@ class WorkspaceManager {
    */
   getChannelId(workspaceId: string): string | undefined {
     return this.workspaceToChannel.get(workspaceId);
-  }
-}
-
-/**
- * Discord message sender for Squire communication
- */
-class DiscordCommunicator {
-  private client: Client;
-  private channelMap = new Map<string, TextChannel | DMChannel | ThreadChannel>(); // workspaceId -> channel
-  private workspaceManager: WorkspaceManager | null = null;
-  private typingIntervals = new Map<string, NodeJS.Timeout>(); // workspaceId -> interval
-  private streamingMessages = new Map<string, Message>(); // workspaceId -> current streaming message
-  private lastStreamContent = new Map<string, string>(); // workspaceId -> last sent content (for dedup)
-  private lastOutputType = new Map<string, string>(); // workspaceId -> last output type (stdout, thinking, tool)
-
-  constructor(client: Client) {
-    this.client = client;
-  }
-
-  /**
-   * Set the workspace manager for channel lookups
-   */
-  setWorkspaceManager(workspaceManager: WorkspaceManager): void {
-    this.workspaceManager = workspaceManager;
-  }
-
-  /**
-   * Restore channel mappings from saved workspaces
-   */
-  async restoreChannels(workspaces: Array<{ workspaceId: string; sourceId?: string }>): Promise<void> {
-    for (const workspace of workspaces) {
-      if (workspace.sourceId) {
-        try {
-          const channel = await this.client.channels.fetch(workspace.sourceId);
-          if (channel && channel.isTextBased() && 'send' in channel) {
-            this.channelMap.set(workspace.workspaceId, channel as TextChannel | DMChannel | ThreadChannel);
-            console.log(`[Communicator] Restored channel for workspace ${workspace.workspaceId}`);
-          }
-        } catch (error) {
-          console.warn(`[Communicator] Could not restore channel ${workspace.sourceId}:`, error);
-        }
-      }
-    }
-  }
-
-  /**
-   * Register a channel for a workspace
-   */
-  registerChannel(workspaceId: string, channel: TextChannel | DMChannel | ThreadChannel): void {
-    this.channelMap.set(workspaceId, channel);
-  }
-
-  /**
-   * Get channel for a workspace
-   */
-  getChannel(workspaceId: string): TextChannel | DMChannel | ThreadChannel | undefined {
-    return this.channelMap.get(workspaceId);
-  }
-
-  /**
-   * Start typing indicator for a workspace (shows "X is typing...")
-   * Discord typing indicator lasts 10 seconds, so we repeat every 8 seconds
-   */
-  startTyping(workspaceId: string): void {
-    const channel = this.channelMap.get(workspaceId);
-    if (!channel || !('sendTyping' in channel)) return;
-
-    // Don't start if already typing
-    if (this.typingIntervals.has(workspaceId)) return;
-
-    // Send initial typing
-    (channel as TextChannel | DMChannel | ThreadChannel).sendTyping().catch(() => {});
-
-    // Repeat every 8 seconds (Discord typing lasts 10s)
-    const interval = setInterval(() => {
-      const ch = this.channelMap.get(workspaceId);
-      if (ch && 'sendTyping' in ch) {
-        (ch as TextChannel | DMChannel | ThreadChannel).sendTyping().catch(() => {});
-      }
-    }, 8000);
-
-    this.typingIntervals.set(workspaceId, interval);
-  }
-
-  /**
-   * Stop typing indicator for a workspace
-   */
-  stopTyping(workspaceId: string): void {
-    const interval = this.typingIntervals.get(workspaceId);
-    if (interval) {
-      clearInterval(interval);
-      this.typingIntervals.delete(workspaceId);
-    }
-  }
-
-  /**
-   * Send a text message to the workspace's Discord channel
-   * For streaming: edits existing message if one exists, otherwise creates new
-   */
-  async sendText(workspaceId: string, content: string, isComplete: boolean = true): Promise<void> {
-    const channel = this.channelMap.get(workspaceId);
-    if (!channel) {
-      console.warn(`[Communicator] No channel for workspace ${workspaceId}`);
-      return;
-    }
-
-    // Skip if content hasn't changed (dedup)
-    const lastContent = this.lastStreamContent.get(workspaceId);
-    if (lastContent === content) {
-      return;
-    }
-    this.lastStreamContent.set(workspaceId, content);
-
-    // For streaming: edit existing message or create new
-    const existingMessage = this.streamingMessages.get(workspaceId);
-
-    if (existingMessage && !isComplete) {
-      // Edit existing message
-      try {
-        const trimmedContent = content.slice(0, 2000);
-        await existingMessage.edit(trimmedContent);
-        return;
-      } catch (error) {
-        // If edit fails (message deleted, etc.), clear state and fall through to create new
-        console.warn('[Communicator] Failed to edit, creating new:', error);
-        this.streamingMessages.delete(workspaceId);
-        this.lastStreamContent.delete(workspaceId);
-        // Fall through to create new message below
-      }
-    }
-
-    // Send new message
-    const trimmedContent = content.slice(0, 2000);
-    const message = await channel.send(trimmedContent);
-
-    // Track for streaming if not complete
-    if (!isComplete) {
-      this.streamingMessages.set(workspaceId, message);
-    } else {
-      // Clear streaming state when complete
-      this.streamingMessages.delete(workspaceId);
-      this.lastStreamContent.delete(workspaceId);
-    }
-  }
-
-  /**
-   * Clear streaming state for a workspace (call when session changes)
-   */
-  clearStreamingState(workspaceId: string): void {
-    this.streamingMessages.delete(workspaceId);
-    this.lastStreamContent.delete(workspaceId);
-    this.lastOutputType.delete(workspaceId);
-  }
-
-  /**
-   * Check if output type changed and start a new message if so.
-   * Returns true if type changed (caller should start fresh).
-   */
-  checkOutputTypeChange(workspaceId: string, newType: string): boolean {
-    const lastType = this.lastOutputType.get(workspaceId);
-    const changed = lastType !== undefined && lastType !== newType;
-
-    if (changed) {
-      // Type changed - clear streaming state to start a new message
-      this.streamingMessages.delete(workspaceId);
-      this.lastStreamContent.delete(workspaceId);
-    }
-
-    // Update the tracked type
-    this.lastOutputType.set(workspaceId, newType);
-    return changed;
-  }
-
-  /**
-   * Send an embed to the workspace's Discord channel
-   */
-  async sendEmbed(
-    workspaceId: string,
-    title: string,
-    description: string,
-    color: 'green' | 'red' | 'blue' | 'yellow' | 'orange' | 'purple' = 'blue'
-  ): Promise<void> {
-    const channel = this.channelMap.get(workspaceId);
-    if (!channel) {
-      console.warn(`[Communicator] No channel for workspace ${workspaceId}`);
-      return;
-    }
-
-    const colorMap = {
-      green: 0x00ff00,
-      red: 0xff0000,
-      blue: 0x0088ff,
-      yellow: 0xffcc00,
-      orange: 0xff8800,
-      purple: 0x9900ff,
-    };
-
-    const embed = new EmbedBuilder()
-      .setTitle(title)
-      .setDescription(description.slice(0, 4096)) // Discord embed description limit
-      .setColor(colorMap[color])
-      .setTimestamp();
-
-    await channel.send({ embeds: [embed] });
-  }
-
-  /**
-   * Send a file to the workspace's Discord channel
-   */
-  async sendFile(
-    workspaceId: string,
-    filePath: string,
-    content?: string
-  ): Promise<void> {
-    const channel = this.channelMap.get(workspaceId);
-    if (!channel) {
-      console.warn(`[Communicator] No channel for workspace ${workspaceId}`);
-      return;
-    }
-
-    const fs = await import('fs');
-    const path = await import('path');
-
-    if (!fs.existsSync(filePath)) {
-      console.error(`[Communicator] File not found: ${filePath}`);
-      return;
-    }
-
-    const fileName = path.basename(filePath);
-    const attachment = new AttachmentBuilder(filePath);
-
-    await channel.send({
-      content: content || undefined,
-      files: [attachment],
-    });
-  }
-
-  /**
-   * Split a message into chunks that fit Discord's limits
-   */
-  private splitMessage(content: string, maxLength: number): string[] {
-    if (content.length <= maxLength) {
-      return [content];
-    }
-
-    const chunks: string[] = [];
-    let remaining = content;
-
-    while (remaining.length > 0) {
-      // Try to break at newline or space
-      let breakPoint = remaining.lastIndexOf('\n', maxLength);
-      if (breakPoint < 0) {
-        breakPoint = remaining.lastIndexOf(' ', maxLength);
-      }
-      if (breakPoint < 0) {
-        breakPoint = maxLength;
-      }
-
-      chunks.push(remaining.slice(0, breakPoint));
-      remaining = remaining.slice(breakPoint).trim();
-    }
-
-    return chunks;
   }
 }
 
@@ -531,6 +267,7 @@ async function main(): Promise<void> {
   const squire = createSquire(squireConfig);
   const workspaceManager = new WorkspaceManager(squire, config);
   const communicator = new DiscordCommunicator(client);
+  const outputRouter = new DiscordOutputRouter(communicator);
 
   // Save session ID after Squire starts (SDK will have created/resumed a session)
   squire.on('squire_started', async () => {
@@ -589,6 +326,10 @@ async function main(): Promise<void> {
     // Update typing indicator for the active workspace
     if (workspaceId) {
       if (activity === 'thinking' || activity === 'working') {
+        if (activity === 'thinking') {
+          // New turn start: reset per-turn continuation tracking.
+          outputRouter.resetWorkspace(workspaceId);
+        }
         // Start typing indicator when processing
         communicator.startTyping(workspaceId);
       } else if (activity === 'ready' || activity === 'error') {
@@ -620,72 +361,16 @@ async function main(): Promise<void> {
       status: discordStatus,
     });
   });
-// Global maps for tracking prefix lengths to avoid duplication when breaking into multiple messages
-const stdoutPrefixLengths = new Map<string, number>();
-const thinkingPrefixLengths = new Map<string, number>();
-const lastStdoutContents = new Map<string, string>();
-const lastThinkingContents = new Map<string, string>();
-
-function clearSessionPrefixes(workspaceId: string) {
-  stdoutPrefixLengths.delete(workspaceId);
-  thinkingPrefixLengths.delete(workspaceId);
-  lastStdoutContents.delete(workspaceId);
-  lastThinkingContents.delete(workspaceId);
-}
-
-function updateSessionPrefixes(workspaceId: string) {
-  stdoutPrefixLengths.set(workspaceId, lastStdoutContents.get(workspaceId)?.length || 0);
-  thinkingPrefixLengths.set(workspaceId, lastThinkingContents.get(workspaceId)?.length || 0);
-}
 
   // Handle SDK output events - stream messages to Discord
   squire.on('output', async (event: any) => {
-    const data = event.data;
-    const workspaceId = data.workspaceId as string | undefined;
-    const content = data.content as string;
-    const outputType = data.outputType as string;
-    const isComplete = data.isComplete as boolean;
-
-    if (!workspaceId) return;
-
-    if (communicator.checkOutputTypeChange(workspaceId, outputType)) {
-      // Type changed. Save the prefix for the new type to avoid repeating old text.
-      if (outputType === 'stdout') {
-        stdoutPrefixLengths.set(workspaceId, lastStdoutContents.get(workspaceId)?.length || 0);
-      } else if (outputType === 'thinking') {
-        thinkingPrefixLengths.set(workspaceId, lastThinkingContents.get(workspaceId)?.length || 0);
-      }
-    }
-
-    let displayContent = content;
-    const isCurrentlyStreaming = (communicator as any).streamingMessages?.has(workspaceId);
-
-    if (outputType === 'stdout') {
-      lastStdoutContents.set(workspaceId, content);
-      const prefixLen = stdoutPrefixLengths.get(workspaceId) || 0;
-      displayContent = content.slice(prefixLen);
-
-      let cleanContent = displayContent.replace(/```squire-tool\n[\s\S]*?```/g, '').trim();
-
-      // Send during streaming OR when complete to close it out.
-      // If complete but no new content, we still send to perform the final edit if we were streaming.
-      if (cleanContent || (isComplete && isCurrentlyStreaming)) {
-        await communicator.sendText(workspaceId, cleanContent || '...', isComplete);
-      }
-    } else if (outputType === 'thinking') {
-      lastThinkingContents.set(workspaceId, content);
-      // We no longer send thinking blocks to Discord,
-      // but breaking the stream state still happens via checkOutputTypeChange().
-    }
+    await outputRouter.handleOutput(event.data);
   });
 
   // Handle tool_use events - break message stream when tool is used
   squire.on('tool_use', async (event: any) => {
     const workspaceId = event.data?.workspaceId as string | undefined;
-    if (workspaceId) {
-      communicator.clearStreamingState(workspaceId);
-      updateSessionPrefixes(workspaceId);
-    }
+    outputRouter.handleToolUse(workspaceId);
   });
 
   // Handle complete events - session finished
@@ -693,10 +378,7 @@ function updateSessionPrefixes(workspaceId: string) {
     const data = event.data;
     const workspaceId = data.workspaceId as string | undefined;
     console.log(`[Squire] Session complete for workspace: ${workspaceId}`);
-    if (workspaceId) {
-      communicator.clearStreamingState(workspaceId);
-      clearSessionPrefixes(workspaceId);
-    }
+    outputRouter.handleComplete(workspaceId);
   });
 
   // Handle approval requests
@@ -706,10 +388,7 @@ function updateSessionPrefixes(workspaceId: string) {
 
     const workspaceId = data.workspaceId as string | undefined;
 
-    if (workspaceId) {
-      communicator.clearStreamingState(workspaceId);
-      updateSessionPrefixes(workspaceId);
-    }
+    outputRouter.handleApprovalRequired(workspaceId);
 
     // Handle AskUserQuestion specially - present UI in Discord
     if (data.toolName === 'AskUserQuestion') {

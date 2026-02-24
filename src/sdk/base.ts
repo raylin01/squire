@@ -231,9 +231,15 @@ export abstract class BaseSDKClient extends EventEmitter<SDKClientEventMap> {
         super();
         this.config = config;
 
+        const envThrottle = Number(process.env.SQUIRE_OUTPUT_THROTTLE_MS || '');
+        const throttleMs =
+            Number.isFinite(envThrottle) && envThrottle >= 0
+                ? Math.floor(envThrottle)
+                : 500;
+
         this.outputThrottler = new OutputThrottler((output) => {
             this.emit("output", output);
-        }, 500);
+        }, throttleMs);
 
         this.messageQueue = new MessageQueue((msg) => this.doSendMessage(msg));
 
@@ -316,7 +322,11 @@ export abstract class BaseSDKClient extends EventEmitter<SDKClientEventMap> {
         isComplete: boolean,
         outputType: "stdout" | "thinking",
     ): void {
-        this.outputThrottler.addStdout(content);
+        if (outputType === "thinking") {
+            this.outputThrottler.addThinking(content);
+        } else {
+            this.outputThrottler.addStdout(content);
+        }
         if (isComplete) {
             this.outputThrottler.flush(true);
         }
