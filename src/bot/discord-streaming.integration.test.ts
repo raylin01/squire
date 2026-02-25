@@ -137,6 +137,28 @@ describe('Discord streaming integration', () => {
     expect(channel.sends.join('\n')).not.toContain('squire-tool');
   });
 
+  it('does not emit dangling markdown fence when squire-tool marker is split across chunks', async () => {
+    const channel = new FakeChannel();
+    const communicator = createCommunicator(channel);
+    const router = new DiscordOutputRouter(communicator);
+
+    await router.handleOutput({
+      workspaceId: 'ws-1',
+      outputType: 'stdout',
+      content: '```',
+      isComplete: false,
+    });
+
+    await router.handleOutput({
+      workspaceId: 'ws-1',
+      outputType: 'stdout',
+      content: '```squire-tool\ntool_name: schedule_list\n```',
+      isComplete: true,
+    });
+
+    expect(channel.sends).toEqual([]);
+  });
+
   it('breaks stream on tool use so post-tool stdout starts a new Discord message', async () => {
     const channel = new FakeChannel();
     const communicator = createCommunicator(channel);
@@ -438,5 +460,39 @@ describe('Discord streaming integration', () => {
     expect(finalSecond).toContain('**Message 3:**');
     expect(finalSecond).toContain('and final tail');
     expect((finalSecond.match(/\*\*Message 2:\*\*/g) || []).length).toBeLessThanOrEqual(1);
+  });
+
+  it('backs up continuation start to avoid mid-word splits across logical boundaries', async () => {
+    const channel = new FakeChannel();
+    const communicator = createCommunicator(channel);
+    const router = new DiscordOutputRouter(communicator);
+
+    router.resetWorkspace('ws-1');
+
+    await router.handleOutput({
+      workspaceId: 'ws-1',
+      outputType: 'stdout',
+      content: 'Let me know if there',
+      isComplete: false,
+    });
+
+    await router.handleOutput({
+      workspaceId: 'ws-1',
+      outputType: 'thinking',
+      content: 'internal',
+      isComplete: false,
+    });
+
+    await router.handleOutput({
+      workspaceId: 'ws-1',
+      outputType: 'stdout',
+      content: 'Let me know if there\'s anything else you\'d like me to help with!',
+      isComplete: true,
+    });
+
+    expect(channel.sends).toEqual([
+      'Let me know if there',
+      'there\'s anything else you\'d like me to help with!',
+    ]);
   });
 });

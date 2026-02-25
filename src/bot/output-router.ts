@@ -16,6 +16,22 @@ export function sanitizeAssistantStdout(content: string): string {
   // Remove fully-formed internal tool blocks first
   let cleaned = content.replace(/```squire-tool[\t ]*\n[\s\S]*?```/g, '');
 
+  // Remove a dangling, unmatched tool fence prefix that can arrive in a separate
+  // chunk (for example: "```" followed by "squire-tool" in the next update).
+  const fenceMatches = [...cleaned.matchAll(/```/g)];
+  if (fenceMatches.length % 2 === 1) {
+    const lastFenceIndex = fenceMatches[fenceMatches.length - 1]?.index ?? -1;
+    if (lastFenceIndex >= 0) {
+      const tail = cleaned.slice(lastFenceIndex + 3);
+      const normalizedTail = tail.trim().toLowerCase();
+      const isSingleLineTail = !tail.includes('\n');
+      const looksLikeToolFencePrefix = 'squire-tool'.startsWith(normalizedTail);
+      if (isSingleLineTail && looksLikeToolFencePrefix) {
+        cleaned = cleaned.slice(0, lastFenceIndex);
+      }
+    }
+  }
+
   // Remove a trailing in-progress internal tool block during streaming
   const partialToolBlockStart = cleaned.lastIndexOf('```squire-tool');
   if (partialToolBlockStart >= 0) {
@@ -49,6 +65,37 @@ export class DiscordOutputRouter {
   private trimLeadingWhitespace(content: string): { value: string; removed: number } {
     const trimmed = content.replace(/^\s+/, '');
     return { value: trimmed, removed: content.length - trimmed.length };
+  }
+
+  private isWordLikeChar(char: string): boolean {
+    return /[A-Za-z0-9]/.test(char);
+  }
+
+  private isBoundaryChar(char: string): boolean {
+    return /\s|[.,!?;:()[\]{}"“”`]/.test(char);
+  }
+
+  private adjustStartToWordBoundary(content: string, startIndex: number): number {
+    if (startIndex <= 0 || startIndex >= content.length) return startIndex;
+
+    const prev = content[startIndex - 1];
+    const curr = content[startIndex];
+    if (!prev || !curr) return startIndex;
+
+    const likelySplitWithinToken =
+      (this.isWordLikeChar(prev) && this.isWordLikeChar(curr)) ||
+      (this.isWordLikeChar(prev) && curr === '\'') ||
+      (prev === '\'' && this.isWordLikeChar(curr));
+
+    if (!likelySplitWithinToken) return startIndex;
+
+    let i = startIndex;
+    while (i > 0) {
+      const c = content[i - 1];
+      if (this.isBoundaryChar(c)) break;
+      i -= 1;
+    }
+    return i;
   }
 
   private trimToStructuredBoundary(content: string): { value: string; removed: number } {
@@ -122,6 +169,7 @@ export class DiscordOutputRouter {
     // assistant segment, send only the new suffix to avoid duplicated text blocks.
     if (!hasStream && previousStdout && cleanContent.startsWith(previousStdout)) {
       contentStartIndex = previousStdout.length;
+      contentStartIndex = this.adjustStartToWordBoundary(cleanContent, contentStartIndex);
       const trimmed = this.trimLeadingWhitespace(cleanContent.slice(contentStartIndex));
       contentStartIndex += trimmed.removed;
       contentToSend = trimmed.value;
@@ -132,6 +180,7 @@ export class DiscordOutputRouter {
       const overlapThreshold = Math.max(40, Math.floor(previousStdout.length * 0.5));
       if (commonPrefixLen >= overlapThreshold) {
         contentStartIndex = commonPrefixLen;
+        contentStartIndex = this.adjustStartToWordBoundary(cleanContent, contentStartIndex);
         const trimmed = this.trimLeadingWhitespace(cleanContent.slice(contentStartIndex));
         contentStartIndex += trimmed.removed;
         contentToSend = trimmed.value;
