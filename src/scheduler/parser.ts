@@ -7,6 +7,10 @@
 import type { TaskSchedule } from '../types.js';
 import { CronExpressionParser } from 'cron-parser';
 
+export interface ScheduleParseOptions {
+  timezone?: string;
+}
+
 export interface ParsedSchedule {
   type: 'once' | 'interval' | 'cron';
   nextRunAt: Date;
@@ -14,7 +18,11 @@ export interface ParsedSchedule {
   cronExpression?: string;
 }
 
-export function parseSchedule(schedule: TaskSchedule, baseDate: Date = new Date()): ParsedSchedule {
+export function parseSchedule(
+  schedule: TaskSchedule,
+  baseDate: Date = new Date(),
+  options?: ScheduleParseOptions
+): ParsedSchedule {
   switch (schedule.type) {
     case 'once':
       return parseOnceSchedule(schedule.value as string | number, baseDate);
@@ -23,7 +31,7 @@ export function parseSchedule(schedule: TaskSchedule, baseDate: Date = new Date(
       return parseIntervalSchedule(schedule.value as number, baseDate);
 
     case 'cron':
-      return parseCronSchedule(schedule.value as string, baseDate);
+      return parseCronSchedule(schedule.value as string, baseDate, options?.timezone);
 
     default:
       throw new Error(`Unknown schedule type: ${String((schedule as { type?: string }).type)}`);
@@ -55,7 +63,7 @@ function parseIntervalSchedule(valueMs: number, baseDate: Date): ParsedSchedule 
   };
 }
 
-function parseCronSchedule(expression: string, baseDate: Date): ParsedSchedule {
+function parseCronSchedule(expression: string, baseDate: Date, timezone?: string): ParsedSchedule {
   // Simplified cron parser - validates format
   const parts = expression.split(' ');
   if (parts.length !== 5) {
@@ -63,7 +71,7 @@ function parseCronSchedule(expression: string, baseDate: Date): ParsedSchedule {
   }
 
   // Use a simple approximation for MVP
-  const nextRun = calculateNextCronRun(expression, baseDate);
+  const nextRun = calculateNextCronRun(expression, baseDate, timezone);
 
   return {
     type: 'cron',
@@ -72,11 +80,11 @@ function parseCronSchedule(expression: string, baseDate: Date): ParsedSchedule {
   };
 }
 
-function calculateNextCronRun(expression: string, baseDate: Date): Date {
+function calculateNextCronRun(expression: string, baseDate: Date, timezone?: string): Date {
   try {
     const interval = CronExpressionParser.parse(expression, { 
       currentDate: baseDate,
-      tz: 'UTC'
+      tz: timezone || 'UTC'
     });
     return interval.next().toDate();
   } catch (error) {
@@ -89,9 +97,10 @@ function calculateNextCronRun(expression: string, baseDate: Date): Date {
 
 export function calculateNextRun(
   schedule: TaskSchedule,
-  lastRunAt: Date
+  lastRunAt: Date,
+  options?: ScheduleParseOptions
 ): Date {
-  const parsed = parseSchedule(schedule, lastRunAt);
+  const parsed = parseSchedule(schedule, lastRunAt, options);
 
   if (parsed.type === 'once') {
     throw new Error('Once tasks cannot be rescheduled');
@@ -102,7 +111,7 @@ export function calculateNextRun(
   }
 
   if (parsed.type === 'cron' && parsed.cronExpression) {
-    return calculateNextCronRun(parsed.cronExpression, lastRunAt);
+    return calculateNextCronRun(parsed.cronExpression, lastRunAt, options?.timezone);
   }
 
   throw new Error('Could not calculate next run');

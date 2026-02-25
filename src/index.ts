@@ -65,10 +65,14 @@ export type {
 
   // Scheduling
   ScheduledTask,
+  ScheduledTaskKind,
+  ScheduledTaskPayload,
+  ScheduledTaskRun,
   TaskSchedule,
   TaskScheduleType,
   TaskStatus,
   TaskResult,
+  TaskRunDecision,
 
   // Skills
   Skill,

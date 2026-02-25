@@ -23,6 +23,8 @@ export interface SquireBotConfig {
     model?: string;
     cliPath?: string;
     permissionMode?: 'strict' | 'autoSafe' | 'permissive';
+    daemonMode?: boolean;
+    pollInterval?: number;
   };
 
   // Squire identity
@@ -113,6 +115,8 @@ export function createDefaultConfig(
     squire: {
       provider: 'gemini',
       permissionMode: 'autoSafe',
+      daemonMode: true,
+      pollInterval: 60000,
     },
     plugins: {
       safeMode: false,

@@ -13,6 +13,10 @@ import {
   Events,
   ActivityType,
   EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  Interaction,
   ChannelType,
   Message,
   TextChannel,
@@ -218,6 +222,28 @@ async function main(): Promise<void> {
       },
     };
   }
+  if (process.env.SQUIRE_DAEMON_MODE) {
+    const daemonMode = process.env.SQUIRE_DAEMON_MODE.toLowerCase() === 'true';
+    config = {
+      ...config,
+      squire: {
+        ...config.squire,
+        daemonMode,
+      },
+    };
+  }
+  if (process.env.SQUIRE_POLL_INTERVAL) {
+    const pollInterval = parseInt(process.env.SQUIRE_POLL_INTERVAL, 10);
+    if (!Number.isNaN(pollInterval) && pollInterval > 0) {
+      config = {
+        ...config,
+        squire: {
+          ...config.squire,
+          pollInterval,
+        },
+      };
+    }
+  }
 
   // Determine safe mode (CLI flag overrides config)
   const useSafeMode = safeMode || config.plugins?.safeMode || false;
@@ -262,6 +288,8 @@ async function main(): Promise<void> {
       provider: 'qmd' as const,
       retentionDays: 90,
     },
+    daemonMode: config.squire?.daemonMode ?? true,
+    pollInterval: config.squire?.pollInterval ?? 60000,
   };
 
   const squire = createSquire(squireConfig);
@@ -379,6 +407,49 @@ async function main(): Promise<void> {
     const workspaceId = data.workspaceId as string | undefined;
     console.log(`[Squire] Session complete for workspace: ${workspaceId}`);
     outputRouter.handleComplete(workspaceId);
+  });
+
+  // Handle scheduled task failures that need user action.
+  squire.on('task_failed', async (event: any) => {
+    const data = event.data;
+    const task = data.task as { taskId: string; workspaceId: string; description: string; status: string; result?: { parsedSummary?: string; error?: string; suggestedFixes?: string[] } } | undefined;
+    if (!task?.workspaceId) {
+      return;
+    }
+
+    const channel = communicator.getChannel(task.workspaceId);
+    if (!channel) {
+      console.warn(`[Squire] Task ${task.taskId} failed but no channel is mapped for workspace ${task.workspaceId}`);
+      return;
+    }
+
+    const summary = task.result?.parsedSummary || task.result?.error || 'Scheduled task failed.';
+    const fixes = (task.result?.suggestedFixes || [])
+      .slice(0, 4)
+      .map(f => `• ${f}`)
+      .join('\n');
+
+    const embed = new EmbedBuilder()
+      .setTitle('Scheduled Task Needs Attention')
+      .setDescription([
+        `**Task:** ${task.description}`,
+        `**Status:** ${task.status}`,
+        '',
+        summary,
+        fixes ? `\n**Suggested Actions**\n${fixes}` : '',
+      ].join('\n'))
+      .setColor(0xff8800)
+      .setFooter({ text: `Task ID: ${task.taskId}` })
+      .setTimestamp();
+
+    const actionRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId(`sched_retry_${task.taskId}`).setLabel('Retry now').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`sched_skip_${task.taskId}`).setLabel('Skip run').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`sched_disable_${task.taskId}`).setLabel('Disable task').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId(`sched_autofix_${task.taskId}`).setLabel('Auto-fix + retry').setStyle(ButtonStyle.Primary)
+    );
+
+    await channel.send({ embeds: [embed], components: [actionRow] });
   });
 
   // Handle approval requests
@@ -508,6 +579,7 @@ async function main(): Promise<void> {
 
     // Set up question handlers for AskUserQuestion
     setupQuestionHandlers(squire, client);
+    setupScheduledTaskActionHandler(client, squire);
 
     // Set up slash command handler
     setupSlashCommandHandler(client, squire);
@@ -562,6 +634,60 @@ async function main(): Promise<void> {
     console.error('[SquireBot] Failed to login:', error);
     process.exit(1);
   }
+}
+
+function parseScheduledTaskAction(customId: string): { action: 'retry' | 'skip' | 'disable' | 'autofix'; taskId: string } | null {
+  if (!customId.startsWith('sched_')) {
+    return null;
+  }
+
+  const [, action, ...taskIdParts] = customId.split('_');
+  const taskId = taskIdParts.join('_');
+  if (!taskId) return null;
+
+  if (action === 'retry' || action === 'skip' || action === 'disable' || action === 'autofix') {
+    return { action, taskId };
+  }
+  return null;
+}
+
+function setupScheduledTaskActionHandler(client: Client, squire: Squire): void {
+  client.on(Events.InteractionCreate, async (interaction: Interaction) => {
+    if (!interaction.isButton()) return;
+
+    const parsed = parseScheduledTaskAction(interaction.customId);
+    if (!parsed) return;
+
+    try {
+      switch (parsed.action) {
+        case 'retry':
+          await squire.retryTask(parsed.taskId);
+          await interaction.reply({ content: `Queued retry for task ${parsed.taskId}.`, ephemeral: true });
+          break;
+        case 'skip':
+          await squire.skipTaskRun(parsed.taskId);
+          await interaction.reply({ content: `Skipped current run for task ${parsed.taskId}.`, ephemeral: true });
+          break;
+        case 'disable':
+          await squire.disableTask(parsed.taskId);
+          await interaction.reply({ content: `Disabled task ${parsed.taskId}.`, ephemeral: true });
+          break;
+        case 'autofix':
+          await squire.retryTask(parsed.taskId, { autoFix: true });
+          await interaction.reply({ content: `Queued auto-fix retry for task ${parsed.taskId}.`, ephemeral: true });
+          break;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (interaction.replied || interaction.deferred) {
+        await interaction.followUp({ content: `Could not apply action: ${message}`, ephemeral: true });
+      } else {
+        await interaction.reply({ content: `Could not apply action: ${message}`, ephemeral: true });
+      }
+    }
+  });
+
+  console.log('[Tasks] Scheduled task action handler initialized');
 }
 
 /**

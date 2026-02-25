@@ -46,17 +46,6 @@ const commands = [
     .setName('task')
     .setDescription('Task scheduling')
     .addSubcommand(sub =>
-      sub
-        .setName('schedule')
-        .setDescription('Schedule a task')
-        .addStringOption(opt =>
-          opt.setName('description').setDescription('Task description').setRequired(true)
-        )
-        .addStringOption(opt =>
-          opt.setName('when').setDescription('When to run (e.g., "in 1 hour", "tomorrow at 9am")').setRequired(true)
-        )
-    )
-    .addSubcommand(sub =>
       sub.setName('list').setDescription('List scheduled tasks')
     )
     .addSubcommand(sub =>
@@ -65,6 +54,33 @@ const commands = [
         .setDescription('Cancel a scheduled task')
         .addStringOption(opt =>
           opt.setName('task_id').setDescription('Task ID to cancel').setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub
+        .setName('pause')
+        .setDescription('Pause a scheduled task')
+        .addStringOption(opt =>
+          opt.setName('task_id').setDescription('Task ID to pause').setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub
+        .setName('resume')
+        .setDescription('Resume a paused task')
+        .addStringOption(opt =>
+          opt.setName('task_id').setDescription('Task ID to resume').setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub
+        .setName('retry')
+        .setDescription('Retry a failed/awaiting task now')
+        .addStringOption(opt =>
+          opt.setName('task_id').setDescription('Task ID to retry').setRequired(true)
+        )
+        .addBooleanOption(opt =>
+          opt.setName('auto_fix').setDescription('Ask Squire to attempt diagnostics/fix before retrying')
         )
     ),
 
@@ -267,16 +283,9 @@ async function handleTask(
   const subcommand = interaction.options.getSubcommand();
 
   switch (subcommand) {
-    case 'schedule': {
-      const description = interaction.options.getString('description', true);
-      const when = interaction.options.getString('when', true);
-
-      // Parse the "when" string into a schedule
-      // For now, just acknowledge - actual scheduling would need more parsing
+    case 'schedule': { // Backwards compatibility in case Discord cache lags after command update.
       await interaction.editReply(
-        `Task scheduled: "${description}"\n` +
-        `When: ${when}\n` +
-        `Note: Full scheduling requires daemon mode.`
+        'Direct task creation is disabled. Ask Squire in chat (mention or DM) to create scheduled tasks.'
       );
       break;
     }
@@ -305,6 +314,42 @@ async function handleTask(
         await interaction.editReply(`Cancelled task: ${taskId}`);
       } catch {
         await interaction.editReply(`Failed to cancel task: ${taskId}`);
+      }
+      break;
+    }
+
+    case 'pause': {
+      const taskId = interaction.options.getString('task_id', true);
+      try {
+        await squire.pauseTask(taskId);
+        await interaction.editReply(`Paused task: ${taskId}`);
+      } catch {
+        await interaction.editReply(`Failed to pause task: ${taskId}`);
+      }
+      break;
+    }
+
+    case 'resume': {
+      const taskId = interaction.options.getString('task_id', true);
+      try {
+        await squire.resumeTask(taskId);
+        await interaction.editReply(`Resumed task: ${taskId}`);
+      } catch {
+        await interaction.editReply(`Failed to resume task: ${taskId}`);
+      }
+      break;
+    }
+
+    case 'retry': {
+      const taskId = interaction.options.getString('task_id', true);
+      const autoFix = interaction.options.getBoolean('auto_fix') === true;
+      try {
+        await squire.retryTask(taskId, { autoFix });
+        await interaction.editReply(
+          `Queued retry for task: ${taskId}${autoFix ? ' (auto-fix enabled)' : ''}`
+        );
+      } catch {
+        await interaction.editReply(`Failed to retry task: ${taskId}`);
       }
       break;
     }
@@ -361,9 +406,12 @@ async function handleHelp(interaction: ChatInputCommandInteraction): Promise<voi
     `  • recall <query> - Search memories\n` +
     `  • overview - Get memory overview\n\n` +
     `**/task**\n` +
-    `  • schedule <description> <when> - Schedule a task\n` +
+    `  • Ask Squire in chat to create scheduled tasks\n` +
     `  • list - List scheduled tasks\n` +
-    `  • cancel <task_id> - Cancel a task\n\n` +
+    `  • cancel <task_id> - Cancel a task\n` +
+    `  • pause <task_id> - Pause a task\n` +
+    `  • resume <task_id> - Resume a paused task\n` +
+    `  • retry <task_id> [auto_fix] - Retry a failed/awaiting task\n\n` +
     `**/config**\n` +
     `  • provider <name> - Switch AI provider (claude/gemini/codex)\n` +
     `  • show - Show current configuration\n\n` +

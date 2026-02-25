@@ -16,7 +16,9 @@ import type {
   MemorySearchResult,
   MemorySource,
   ScheduledTask,
+  ScheduledTaskPayload,
   TaskSchedule,
+  TaskResult,
   Skill,
   SquireMessage,
   SquireEvent,
@@ -35,7 +37,7 @@ import { SkillManager, createSkillManager } from './skills/index.js';
 import { Scheduler, createScheduler } from './scheduler/index.js';
 import { TicketManager, createTicketManager } from './tickets/index.js';
 import { PersonalityManager, createPersonalityManager } from './personality/index.js';
-import { toolRegistry, setCommunicationHandler, communicate, setSelfManageState, setMemoryManager as setToolMemoryManager, setScheduler as setToolScheduler, setTicketManager as setToolTicketManager, setSquireInstance, setExecutionContext, clearExecutionContext, getExecutionContext } from './tools/index.js';
+import { toolRegistry, setCommunicationHandler, communicate, setSelfManageState, setMemoryManager as setToolMemoryManager, setScheduler as setToolScheduler, setSchedulerWorkspaceAccessors, setTicketManager as setToolTicketManager, setSquireInstance, setExecutionContext, clearExecutionContext, getExecutionContext } from './tools/index.js';
 import { checkBashPermission, checkToolPermission } from './permissions/index.js';
 import { addLearnedPattern } from './permissions/learned-patterns.js';
 import { WorkspaceSession } from './workspace-session.js';
@@ -189,10 +191,29 @@ export class Squire extends EventEmitter {
       });
 
       setToolScheduler(this.scheduler);
+      setSchedulerWorkspaceAccessors({
+        getTimezone: (workspaceId: string) => this.getWorkspaceTimezone(workspaceId),
+        setTimezone: async (workspaceId: string, timezone: string) => {
+          await this.setWorkspaceTimezone(workspaceId, timezone);
+        },
+      });
 
       // Set up task executor
       this.scheduler.setExecutor(async (task) => {
         return this.executeScheduledTask(task);
+      });
+      this.scheduler.setLifecycleHandlers({
+        onTaskCompleted: async (task, result) => {
+          this.emitEvent('task_completed', { task, result });
+        },
+        onTaskAwaitingUser: async (task, result) => {
+          this.emitEvent('task_failed', {
+            task,
+            result,
+            parsedSummary: result.parsedSummary,
+            suggestedFixes: result.suggestedFixes,
+          });
+        },
       });
 
       this.scheduler.start();
@@ -480,6 +501,33 @@ export class Squire extends EventEmitter {
     this.emitEvent('workspace_updated', { workspaceId, status });
   }
 
+  /**
+   * Get workspace timezone
+   */
+  getWorkspaceTimezone(workspaceId: string): string | undefined {
+    const workspace = this.workspaces.get(workspaceId);
+    return workspace?.context?.timezone;
+  }
+
+  /**
+   * Persist workspace timezone to workspace state and metadata file.
+   */
+  async setWorkspaceTimezone(workspaceId: string, timezone: string): Promise<void> {
+    const workspace = this.workspaces.get(workspaceId);
+    if (!workspace) {
+      throw new Error(`Workspace not found: ${workspaceId}`);
+    }
+
+    const normalized = this.normalizeTimezone(timezone);
+    workspace.context = {
+      ...workspace.context,
+      timezone: normalized,
+    };
+
+    await this.syncWorkspaceMetadata(workspace);
+    await this.saveWorkspaces();
+  }
+
   // ==========================================================================
   // Memory (Phase 2)
   // ==========================================================================
@@ -687,6 +735,7 @@ export class Squire extends EventEmitter {
   private async processToolCalls(content: string, workspaceId?: string): Promise<string> {
     const toolBlockRegex = /```squire-tool\n([\s\S]*?)```/g;
     let result = content;
+    const scheduleToolResults: string[] = [];
     let match;
 
     while ((match = toolBlockRegex.exec(content)) !== null) {
@@ -700,7 +749,13 @@ export class Squire extends EventEmitter {
           console.log(`[Squire] Executing tool: ${toolName} (workspace: ${workspaceId?.slice(0, 8)}...)`);
           // Set execution context so tools know which workspace they're responding to
           setExecutionContext({ workspaceId });
-          await toolRegistry.execute(toolName, params);
+          const toolResult = await toolRegistry.execute(toolName, params);
+          if (toolName.startsWith('schedule_')) {
+            const trimmed = String(toolResult || '').trim();
+            if (trimmed) {
+              scheduleToolResults.push(trimmed);
+            }
+          }
           // Remove the tool block from output
           result = result.replace(match[0], '');
         } catch (error) {
@@ -711,7 +766,11 @@ export class Squire extends EventEmitter {
       }
     }
 
-    return result.trim();
+    const cleaned = result.trim();
+    if (!cleaned && scheduleToolResults.length > 0) {
+      return scheduleToolResults.join('\n\n');
+    }
+    return cleaned;
   }
 
   /**
@@ -1079,7 +1138,7 @@ export class Squire extends EventEmitter {
       const pendingInfo = this.pendingApprovals.get(requestId);
       if (pendingInfo) {
         // Record learned pattern for Bash commands
-        if (pendingInfo.toolName === 'Bash' && pendingInfo.toolInput.command) {
+        if ((pendingInfo.toolName === 'Bash' || pendingInfo.toolName === 'bash') && pendingInfo.toolInput.command) {
           const command = pendingInfo.toolInput.command as string;
           addLearnedPattern(command);
         }
@@ -1144,14 +1203,41 @@ export class Squire extends EventEmitter {
       throw new Error('Scheduler requires daemon mode');
     }
 
+    const workspace = this.workspaces.get(options.workspaceId);
+    const timezone = options.timezone || workspace?.context?.timezone;
+    if (options.timezone && workspace) {
+      workspace.context = {
+        ...workspace.context,
+        timezone: this.normalizeTimezone(options.timezone),
+      };
+      await this.syncWorkspaceMetadata(workspace);
+      await this.saveWorkspaces();
+    }
+
     const task = this.scheduler.schedule(
       options.workspaceId,
       options.description,
-      options.schedule
+      options.schedule,
+      {
+        payload: options.payload || {
+          objective: options.description,
+        },
+        timezone,
+      }
     );
 
     this.emitEvent('task_scheduled', { task });
     return task;
+  }
+
+  /**
+   * Get one scheduled task
+   */
+  getTask(taskId: string): ScheduledTask | null {
+    if (!this.scheduler) {
+      return null;
+    }
+    return this.scheduler.getTask(taskId);
   }
 
   /**
@@ -1185,10 +1271,60 @@ export class Squire extends EventEmitter {
     console.log(`[Squire] Cancelled task: ${taskId}`);
   }
 
+  async pauseTask(taskId: string): Promise<void> {
+    if (!this.scheduler) {
+      throw new Error('Scheduler not initialized');
+    }
+    const paused = this.scheduler.pause(taskId);
+    if (!paused) {
+      throw new Error(`Task not found or not pausable: ${taskId}`);
+    }
+  }
+
+  async resumeTask(taskId: string): Promise<void> {
+    if (!this.scheduler) {
+      throw new Error('Scheduler not initialized');
+    }
+    const resumed = this.scheduler.resume(taskId);
+    if (!resumed) {
+      throw new Error(`Task not found or not resumable: ${taskId}`);
+    }
+  }
+
+  async retryTask(taskId: string, options?: { autoFix?: boolean }): Promise<void> {
+    if (!this.scheduler) {
+      throw new Error('Scheduler not initialized');
+    }
+    const queued = this.scheduler.retryNow(taskId, options);
+    if (!queued) {
+      throw new Error(`Task not found or not retryable: ${taskId}`);
+    }
+  }
+
+  async skipTaskRun(taskId: string): Promise<void> {
+    if (!this.scheduler) {
+      throw new Error('Scheduler not initialized');
+    }
+    const skipped = this.scheduler.skipCurrentRun(taskId);
+    if (!skipped) {
+      throw new Error(`Task not found or not skippable: ${taskId}`);
+    }
+  }
+
+  async disableTask(taskId: string): Promise<void> {
+    if (!this.scheduler) {
+      throw new Error('Scheduler not initialized');
+    }
+    const disabled = this.scheduler.disable(taskId);
+    if (!disabled) {
+      throw new Error(`Task not found: ${taskId}`);
+    }
+  }
+
   /**
    * Execute a scheduled task (called by scheduler)
    */
-  private async executeScheduledTask(task: ScheduledTask): Promise<{ success: boolean; output?: string; error?: string; completedAt: string }> {
+  private async executeScheduledTask(task: ScheduledTask): Promise<TaskResult> {
     console.log(`[Squire] Executing scheduled task: ${task.description}`);
 
     try {
@@ -1205,8 +1341,36 @@ export class Squire extends EventEmitter {
       // Set as active workspace
       this.setActiveWorkspace(task.workspaceId);
 
-      // Send a system message to the workspace to trigger the AI
-      const systemPrompt = `[System] Scheduled Task Triggered: ${task.description}\n\nPlease execute this task now.`;
+      const previousFailure = task.result?.parsedSummary || task.result?.error;
+      const timezone = task.timezone || workspace.context?.timezone || 'UTC';
+      const autoFixMode = task.payload.autoFixRequested === true;
+      const contextLines = [
+        '[System] Scheduled Task Triggered',
+        `Task ID: ${task.taskId}`,
+        `Description: ${task.description}`,
+        `Objective: ${task.payload.objective}`,
+        `Timezone: ${timezone}`,
+        `Scheduled by: scheduler`,
+      ];
+
+      if (task.payload.context) {
+        contextLines.push(`Run context: ${task.payload.context}`);
+      }
+      if (previousFailure) {
+        contextLines.push(`Previous failure summary: ${previousFailure}`);
+      }
+      if (autoFixMode) {
+        contextLines.push('Mode: auto-fix then retry. Diagnose the failure and attempt safe remediation before completing.');
+      }
+
+      contextLines.push(
+        '',
+        'Execute this scheduled run now.',
+        'If you need high-risk commands, request approval as usual.',
+        'If the run fails, explain the failure clearly and propose concrete fixes.'
+      );
+
+      const systemPrompt = contextLines.join('\n');
 
       // Use the existing sendMessage infrastructure which handles context and session management
       await this.sendMessage(task.workspaceId, systemPrompt);
@@ -1217,9 +1381,16 @@ export class Squire extends EventEmitter {
         completedAt: new Date().toISOString(),
       };
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
       return {
         success: false,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage,
+        parsedSummary: `The scheduled run could not be started because: ${errorMessage}`,
+        suggestedFixes: [
+          'Retry now in case this was temporary.',
+          'Check whether the workspace/channel still exists.',
+          'Disable the task if it is no longer needed.',
+        ],
         completedAt: new Date().toISOString(),
       };
     }
@@ -1340,9 +1511,53 @@ export class Squire extends EventEmitter {
     try {
       const workspacesData = Array.from(this.workspaces.values());
       fs.writeFileSync(workspacesFile, JSON.stringify(workspacesData, null, 2));
+
+      for (const workspace of workspacesData) {
+        await this.syncWorkspaceMetadata(workspace);
+      }
+
       console.log(`[Squire] Saved ${workspacesData.length} workspaces to storage`);
     } catch (error) {
       console.error('[Squire] Failed to save workspaces:', error);
+    }
+  }
+
+  private normalizeTimezone(timezone: string): string {
+    try {
+      const normalized = new Intl.DateTimeFormat('en-US', { timeZone: timezone }).resolvedOptions().timeZone;
+      if (!normalized) {
+        throw new Error(`Invalid timezone: ${timezone}`);
+      }
+      return normalized;
+    } catch {
+      throw new Error(`Invalid timezone "${timezone}"`);
+    }
+  }
+
+  private async syncWorkspaceMetadata(workspace: Workspace): Promise<void> {
+    const sandboxPath = workspace.context?.sandboxPath;
+    if (!sandboxPath) {
+      return;
+    }
+
+    try {
+      if (!fs.existsSync(sandboxPath)) {
+        fs.mkdirSync(sandboxPath, { recursive: true });
+      }
+
+      const metadataPath = path.join(sandboxPath, '.workspace.json');
+      const metadata = {
+        version: 1,
+        workspaceId: workspace.workspaceId,
+        name: workspace.name,
+        source: workspace.source,
+        sourceId: workspace.sourceId,
+        timezone: workspace.context?.timezone || null,
+        updatedAt: new Date().toISOString(),
+      };
+      fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
+    } catch (error) {
+      console.warn(`[Squire] Failed to sync workspace metadata for ${workspace.workspaceId}:`, error);
     }
   }
 

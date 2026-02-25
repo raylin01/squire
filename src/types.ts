@@ -137,6 +137,8 @@ export interface WorkspaceContext {
   sandboxPath?: string;
   /** Project directory - where the SDK runs (defaults to sandboxPath) */
   projectPath?: string;
+  /** IANA timezone for workspace scheduling (e.g. "America/New_York") */
+  timezone?: string;
   /** CLI session ID for resuming conversations (persists context across restarts) */
   cliSessionId?: string;
   currentTask?: string;
@@ -174,8 +176,26 @@ export interface MemorySearchResult {
 // Scheduled Tasks
 // ============================================================================
 
-export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed';
+export type TaskStatus =
+  | 'pending'
+  | 'running'
+  | 'awaiting_user'
+  | 'paused'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
 export type TaskScheduleType = 'once' | 'interval' | 'cron';
+export type ScheduledTaskKind = 'self';
+
+export interface ScheduledTaskPayload {
+  objective: string;
+  context?: string;
+  autoFixRequested?: boolean;
+  lastFailureSummary?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export type TaskRunDecision = 'retry_now' | 'skip_run' | 'disable_task' | 'auto_fix_retry';
 
 export interface TaskSchedule {
   type: TaskScheduleType;
@@ -185,12 +205,17 @@ export interface TaskSchedule {
 export interface ScheduledTask {
   taskId: string;
   workspaceId: string;
+  kind: ScheduledTaskKind;
   description: string;
+  payload: ScheduledTaskPayload;
+  timezone?: string;
   schedule: TaskSchedule;
   status: TaskStatus;
   lastRunAt?: string;
   nextRunAt: string;
   createdAt: string;
+  awaitingDecisionReason?: string;
+  lastDecisionAt?: string;
   result?: TaskResult;
   runCount?: number;
 }
@@ -199,7 +224,21 @@ export interface TaskResult {
   success: boolean;
   output?: string;
   error?: string;
+  parsedSummary?: string;
+  suggestedFixes?: string[];
   completedAt: string;
+}
+
+export interface ScheduledTaskRun {
+  runId: string;
+  taskId: string;
+  startedAt: string;
+  completedAt?: string;
+  status: TaskStatus;
+  outputExcerpt?: string;
+  rawError?: string;
+  parsedSummary?: string;
+  decision?: TaskRunDecision;
 }
 
 // ============================================================================
@@ -470,8 +509,13 @@ export interface SquireInterface {
 
   // Scheduling
   scheduleTask(options: ScheduleTaskOptions): Promise<ScheduledTask>;
+  getTask(taskId: string): ScheduledTask | null;
   getTasks(workspaceId?: string): ScheduledTask[];
   cancelTask(taskId: string): Promise<void>;
+  pauseTask(taskId: string): Promise<void>;
+  resumeTask(taskId: string): Promise<void>;
+  retryTask(taskId: string, options?: { autoFix?: boolean }): Promise<void>;
+  skipTaskRun(taskId: string): Promise<void>;
 
   // Skills
   getSkills(): Skill[];
@@ -502,5 +546,7 @@ export interface RememberOptions {
 export interface ScheduleTaskOptions {
   workspaceId: string;
   description: string;
+  payload?: ScheduledTaskPayload;
+  timezone?: string;
   schedule: TaskSchedule;
 }

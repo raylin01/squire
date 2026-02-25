@@ -5,7 +5,7 @@
  */
 
 import { v4 as uuid } from 'uuid';
-import type { ScheduledTask, TaskSchedule, TaskResult } from '../types.js';
+import type { ScheduledTask, ScheduledTaskPayload, TaskResult, TaskSchedule } from '../types.js';
 import { TaskStorage } from './storage.js';
 import { parseSchedule, calculateNextRun } from './parser.js';
 
@@ -15,12 +15,23 @@ export interface SchedulerOptions {
   onTaskDue?: (task: ScheduledTask) => Promise<TaskResult>;
 }
 
+export interface ScheduleTaskOptions {
+  payload?: ScheduledTaskPayload;
+  timezone?: string;
+}
+
+export interface SchedulerLifecycleHandlers {
+  onTaskCompleted?: (task: ScheduledTask, result: TaskResult) => Promise<void> | void;
+  onTaskAwaitingUser?: (task: ScheduledTask, result: TaskResult) => Promise<void> | void;
+}
+
 export type TaskExecutor = (task: ScheduledTask) => Promise<TaskResult>;
 
 export class Scheduler {
   private storage: TaskStorage;
   private pollInterval: number;
   private onTaskDue?: TaskExecutor;
+  private lifecycleHandlers: SchedulerLifecycleHandlers = {};
   private intervalId: NodeJS.Timeout | null = null;
   private running: boolean = false;
 
@@ -39,11 +50,13 @@ export class Scheduler {
     this.running = true;
     console.log(`[Scheduler] Starting with poll interval ${this.pollInterval}ms`);
 
-    // Check immediately
-    this.poll();
+    // Check immediately.
+    void this.poll();
 
-    // Then poll on interval
-    this.intervalId = setInterval(() => this.poll(), this.pollInterval);
+    // Then poll on interval.
+    this.intervalId = setInterval(() => {
+      void this.poll();
+    }, this.pollInterval);
   }
 
   /**
@@ -72,13 +85,21 @@ export class Scheduler {
   /**
    * Schedule a new task
    */
-  schedule(workspaceId: string, description: string, schedule: TaskSchedule): ScheduledTask {
-    const parsed = parseSchedule(schedule);
+  schedule(
+    workspaceId: string,
+    description: string,
+    schedule: TaskSchedule,
+    options?: ScheduleTaskOptions
+  ): ScheduledTask {
+    const parsed = parseSchedule(schedule, new Date(), { timezone: options?.timezone });
 
     const task: ScheduledTask = {
       taskId: uuid(),
       workspaceId,
+      kind: 'self',
       description,
+      payload: options?.payload || { objective: description },
+      timezone: options?.timezone,
       schedule,
       status: 'pending',
       nextRunAt: parsed.nextRunAt.toISOString(),
@@ -123,11 +144,72 @@ export class Scheduler {
     return deleted;
   }
 
+  pause(taskId: string): boolean {
+    return this.storage.pauseTask(taskId);
+  }
+
+  resume(taskId: string): boolean {
+    return this.storage.resumeTask(taskId);
+  }
+
+  retryNow(taskId: string, options?: { autoFix?: boolean }): boolean {
+    const task = this.storage.getTask(taskId);
+    if (!task) return false;
+
+    if (options?.autoFix) {
+      const updatedPayload: ScheduledTaskPayload = {
+        ...task.payload,
+        autoFixRequested: true,
+        lastFailureSummary: task.result?.parsedSummary || task.result?.error || task.payload.lastFailureSummary,
+      };
+      this.storage.updatePayload(taskId, updatedPayload);
+    }
+
+    const changed = this.storage.retryNow(taskId);
+    if (changed) {
+      this.storage.recordLatestRunDecision(taskId, options?.autoFix ? 'auto_fix_retry' : 'retry_now');
+    }
+    return changed;
+  }
+
+  skipCurrentRun(taskId: string): boolean {
+    const task = this.storage.getTask(taskId);
+    if (!task) return false;
+
+    // Skip for one-time tasks disables the task.
+    if (task.schedule.type === 'once') {
+      const disabled = this.storage.disableTask(taskId);
+      if (disabled) {
+        this.storage.recordLatestRunDecision(taskId, 'skip_run');
+      }
+      return disabled;
+    }
+
+    const nextRunAt = calculateNextRun(task.schedule, new Date(), { timezone: task.timezone }).toISOString();
+    const changed = this.storage.skipRun(taskId, nextRunAt);
+    if (changed) {
+      this.storage.recordLatestRunDecision(taskId, 'skip_run');
+    }
+    return changed;
+  }
+
+  disable(taskId: string): boolean {
+    const changed = this.storage.disableTask(taskId);
+    if (changed) {
+      this.storage.recordLatestRunDecision(taskId, 'disable_task');
+    }
+    return changed;
+  }
+
   /**
    * Set the task executor
    */
   setExecutor(executor: TaskExecutor): void {
     this.onTaskDue = executor;
+  }
+
+  setLifecycleHandlers(handlers: SchedulerLifecycleHandlers): void {
+    this.lifecycleHandlers = handlers;
   }
 
   /**
@@ -147,22 +229,44 @@ export class Scheduler {
     }
   }
 
+  private summarizeFailure(task: ScheduledTask, result: TaskResult): { parsedSummary: string; suggestedFixes: string[] } {
+    const raw = (result.error || 'Unknown error').trim();
+    const parsedSummary = `Scheduled task "${task.description}" failed to run. ${raw}`;
+    const suggestedFixes = [
+      'Retry now if this looks transient.',
+      'Skip this run and wait for the next schedule.',
+      'Disable the task if it is no longer needed.',
+      'Use auto-fix retry to let Squire attempt diagnostics before rerun.',
+    ];
+    return { parsedSummary, suggestedFixes };
+  }
+
   /**
    * Execute a single task
    */
   private async executeTask(task: ScheduledTask): Promise<void> {
-    console.log(`[Scheduler] Executing task ${task.taskId}: "${task.description}"`);
+    let runnableTask = task;
+    if (task.payload.autoFixRequested) {
+      const normalizedPayload: ScheduledTaskPayload = {
+        ...task.payload,
+        autoFixRequested: false,
+      };
+      this.storage.updatePayload(task.taskId, normalizedPayload);
+      runnableTask = { ...task, payload: normalizedPayload };
+    }
 
-    // Mark as running
-    this.storage.updateStatus(task.taskId, 'running');
+    console.log(`[Scheduler] Executing task ${runnableTask.taskId}: "${runnableTask.description}"`);
+
+    // Mark as running.
+    this.storage.updateStatus(runnableTask.taskId, 'running');
+    const runId = this.storage.startRun(runnableTask.taskId);
 
     let result: TaskResult;
 
     try {
       if (this.onTaskDue) {
-        result = await this.onTaskDue(task);
+        result = await this.onTaskDue(runnableTask);
       } else {
-        // Default: just mark as completed
         result = {
           success: true,
           output: 'No executor configured',
@@ -177,23 +281,51 @@ export class Scheduler {
       };
     }
 
-    // Calculate next run for repeating tasks
-    let nextRunAt: string | undefined;
-    if (task.schedule.type !== 'once') {
-      try {
-        const next = calculateNextRun(task.schedule, new Date());
-        nextRunAt = next.toISOString();
-        console.log(`[Scheduler] Task ${task.taskId} next run: ${nextRunAt}`);
-      } catch {
-        // Task cannot be rescheduled
-        console.log(`[Scheduler] Task ${task.taskId} completed (no repeat)`);
-      }
+    if (!result.completedAt) {
+      result.completedAt = new Date().toISOString();
     }
 
-    // Update task
-    this.storage.updateAfterRun(task.taskId, result, nextRunAt);
+    let nextRunAt: string | undefined;
+    let status: ScheduledTask['status'] = 'completed';
+    let awaitingReason: string | undefined;
 
-    console.log(`[Scheduler] Task ${task.taskId} ${result.success ? 'completed' : 'failed'}`);
+    if (result.success) {
+      if (runnableTask.schedule.type !== 'once') {
+        nextRunAt = calculateNextRun(runnableTask.schedule, new Date(result.completedAt), { timezone: runnableTask.timezone }).toISOString();
+        status = 'pending';
+      } else {
+        status = 'completed';
+      }
+    } else {
+      status = 'awaiting_user';
+      awaitingReason = result.error || 'Task failed';
+
+      const parsed = this.summarizeFailure(runnableTask, result);
+      result.parsedSummary = result.parsedSummary || parsed.parsedSummary;
+      result.suggestedFixes = result.suggestedFixes || parsed.suggestedFixes;
+    }
+
+    this.storage.updateAfterRun({
+      taskId: runnableTask.taskId,
+      runId,
+      result,
+      status,
+      nextRunAt,
+      awaitingDecisionReason: awaitingReason,
+    });
+
+    const updated = this.storage.getTask(runnableTask.taskId);
+    if (!updated) {
+      return;
+    }
+
+    if (status === 'awaiting_user') {
+      await this.lifecycleHandlers.onTaskAwaitingUser?.(updated, result);
+    } else if (status === 'completed' || status === 'pending') {
+      await this.lifecycleHandlers.onTaskCompleted?.(updated, result);
+    }
+
+    console.log(`[Scheduler] Task ${runnableTask.taskId} ${status}`);
   }
 
   /**
