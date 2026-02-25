@@ -17,10 +17,19 @@ export type PermissionMode = 'strict' | 'autoSafe' | 'permissive';
 // ============================================================================
 
 export interface MCPServerConfig {
-  name: string;
   command: string;
   args?: string[];
   env?: Record<string, string>;
+  cwd?: string;
+  url?: string;
+  type?: 'stdio' | 'sse' | 'http';
+}
+
+export interface NativeToolBridgeConfig {
+  serverName: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
 }
 
 export interface SDKConfig {
@@ -37,7 +46,16 @@ export interface SDKConfig {
   permissionMode: PermissionMode;
 
   /** MCP servers to configure */
-  mcpServers?: MCPServerConfig[];
+  mcpServers?: Record<string, MCPServerConfig>;
+
+  /** Native tools exposed to the provider (directly or through MCP bridge) */
+  tools?: SDKTool[];
+
+  /** Runtime bridge server configuration for native Squire tools */
+  toolBridge?: NativeToolBridgeConfig;
+
+  /** Directory for provider runtime files (generated settings, etc.) */
+  runtimeDir?: string;
 
   /** Environment variables to pass to CLI */
   env?: Record<string, string>;

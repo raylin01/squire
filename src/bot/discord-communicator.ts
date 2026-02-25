@@ -22,6 +22,7 @@ export class DiscordCommunicator {
   private lastStreamContent = new Map<string, string>(); // workspaceId -> last sent content (for dedup)
   private lastOutputType = new Map<string, string>(); // workspaceId -> last output type (stdout, thinking, tool)
   private streamGenerations = new Map<string, number>(); // workspaceId -> stream state generation
+  private sendChains = new Map<string, Promise<void>>(); // workspaceId -> queued send operations
 
   constructor(client: Client) {
     this.client = client;
@@ -40,6 +41,20 @@ export class DiscordCommunicator {
     const next = this.getGeneration(workspaceId) + 1;
     this.streamGenerations.set(workspaceId, next);
     return next;
+  }
+
+  private enqueueSend(workspaceId: string, task: () => Promise<void>): Promise<void> {
+    const previous = this.sendChains.get(workspaceId) || Promise.resolve();
+    const run = previous.catch(() => undefined).then(task);
+    const settled = run
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.sendChains.get(workspaceId) === settled) {
+          this.sendChains.delete(workspaceId);
+        }
+      });
+    this.sendChains.set(workspaceId, settled);
+    return run;
   }
 
   /**
@@ -120,83 +135,94 @@ export class DiscordCommunicator {
    * For streaming: edits existing message if one exists, otherwise creates new
    */
   async sendText(workspaceId: string, content: string, isComplete: boolean = true): Promise<void> {
-    const channel = this.channelMap.get(workspaceId);
-    if (!channel) {
-      console.warn(`[Communicator] No channel for workspace ${workspaceId}`);
-      return;
-    }
-    const generationAtStart = this.getGeneration(workspaceId);
-
-    const chunks = this.splitMessage(content, 2000).filter(chunk => chunk.length > 0);
-    if (chunks.length === 0) {
-      this.debug(`sendText skip empty workspace=${workspaceId.slice(0, 8)}`);
-      return;
-    }
-
-    // For streaming: edit existing message or create new
-    const existingMessage = this.streamingMessages.get(workspaceId);
-    const lastContent = this.lastStreamContent.get(workspaceId);
-
-    // Dedup non-final stream updates
-    if (!isComplete && lastContent === content) {
-      this.debug(`sendText dedup streaming workspace=${workspaceId.slice(0, 8)} len=${content.length}`);
-      return;
-    }
-
-    // Duplicate complete event without an active stream can be ignored
-    if (isComplete && !existingMessage && lastContent === content) {
-      this.debug(`sendText dedup complete workspace=${workspaceId.slice(0, 8)} len=${content.length}`);
-      return;
-    }
-
-    const firstChunk = chunks[0];
-
-    if (existingMessage) {
+    return this.enqueueSend(workspaceId, async () => {
       try {
-        this.debug(`sendText edit workspace=${workspaceId.slice(0, 8)} len=${firstChunk.length} complete=${isComplete} chunks=${chunks.length}`);
-        await existingMessage.edit(firstChunk);
+        const channel = this.channelMap.get(workspaceId);
+        if (!channel) {
+          console.warn(`[Communicator] No channel for workspace ${workspaceId}`);
+          return;
+        }
+        const generationAtStart = this.getGeneration(workspaceId);
+
+        const chunks = this.splitMessage(content, 2000).filter(chunk => chunk.length > 0);
+        if (chunks.length === 0) {
+          this.debug(`sendText skip empty workspace=${workspaceId.slice(0, 8)}`);
+          return;
+        }
+
+        // For streaming: edit existing message or create new
+        const existingMessage = this.streamingMessages.get(workspaceId);
+        const lastContent = this.lastStreamContent.get(workspaceId);
+
+        // Dedup non-final stream updates
+        if (!isComplete && lastContent === content) {
+          this.debug(`sendText dedup streaming workspace=${workspaceId.slice(0, 8)} len=${content.length}`);
+          return;
+        }
+
+        // Duplicate complete event without an active stream can be ignored
+        if (isComplete && !existingMessage && lastContent === content) {
+          this.debug(`sendText dedup complete workspace=${workspaceId.slice(0, 8)} len=${content.length}`);
+          return;
+        }
+
+        const firstChunk = chunks[0];
+
+        if (existingMessage) {
+          try {
+            this.debug(`sendText edit workspace=${workspaceId.slice(0, 8)} len=${firstChunk.length} complete=${isComplete} chunks=${chunks.length}`);
+            await existingMessage.edit(firstChunk);
+            if (this.getGeneration(workspaceId) !== generationAtStart) {
+              this.debug(`sendText edit stale workspace=${workspaceId.slice(0, 8)} startGen=${generationAtStart} currentGen=${this.getGeneration(workspaceId)}; skip state update`);
+              return;
+            }
+            this.lastStreamContent.set(workspaceId, content);
+
+            if (isComplete) {
+              for (const chunk of chunks.slice(1)) {
+                await channel.send(chunk);
+              }
+              this.streamingMessages.delete(workspaceId);
+              this.lastStreamContent.delete(workspaceId);
+            }
+            return;
+          } catch (error) {
+            // If edit fails (message deleted, etc.), clear state and fall through to create new
+            console.warn('[Communicator] Failed to edit, creating new:', error);
+            this.debug(`sendText edit failed workspace=${workspaceId.slice(0, 8)}; fallback send`);
+            this.streamingMessages.delete(workspaceId);
+            this.lastStreamContent.delete(workspaceId);
+            // Fall through to create new message below
+          }
+        }
+
+        this.debug(`sendText send new workspace=${workspaceId.slice(0, 8)} len=${firstChunk.length} complete=${isComplete} chunks=${chunks.length}`);
+        const message = await channel.send(firstChunk);
         if (this.getGeneration(workspaceId) !== generationAtStart) {
-          this.debug(`sendText edit stale workspace=${workspaceId.slice(0, 8)} startGen=${generationAtStart} currentGen=${this.getGeneration(workspaceId)}; skip state update`);
+          this.debug(`sendText send stale workspace=${workspaceId.slice(0, 8)} startGen=${generationAtStart} currentGen=${this.getGeneration(workspaceId)}; skip state update`);
           return;
         }
         this.lastStreamContent.set(workspaceId, content);
 
-        if (isComplete) {
+        // Track for streaming if not complete
+        if (!isComplete) {
+          this.streamingMessages.set(workspaceId, message as Message);
+        } else {
           for (const chunk of chunks.slice(1)) {
             await channel.send(chunk);
           }
           this.streamingMessages.delete(workspaceId);
           this.lastStreamContent.delete(workspaceId);
         }
-        return;
       } catch (error) {
-        // If edit fails (message deleted, etc.), clear state and fall through to create new
-        console.warn('[Communicator] Failed to edit, creating new:', error);
-        this.debug(`sendText edit failed workspace=${workspaceId.slice(0, 8)}; fallback send`);
+        const err = error instanceof Error ? error : new Error(String(error));
+        console.error(`[Communicator] sendText failed for workspace ${workspaceId}:`, err.message);
+        this.debug(`sendText error workspace=${workspaceId.slice(0, 8)} complete=${isComplete}: ${err.message}`);
+        // Clear stream tracking so future sends start fresh after transient failures.
         this.streamingMessages.delete(workspaceId);
         this.lastStreamContent.delete(workspaceId);
-        // Fall through to create new message below
       }
-    }
-
-    this.debug(`sendText send new workspace=${workspaceId.slice(0, 8)} len=${firstChunk.length} complete=${isComplete} chunks=${chunks.length}`);
-    const message = await channel.send(firstChunk);
-    if (this.getGeneration(workspaceId) !== generationAtStart) {
-      this.debug(`sendText send stale workspace=${workspaceId.slice(0, 8)} startGen=${generationAtStart} currentGen=${this.getGeneration(workspaceId)}; skip state update`);
-      return;
-    }
-    this.lastStreamContent.set(workspaceId, content);
-
-    // Track for streaming if not complete
-    if (!isComplete) {
-      this.streamingMessages.set(workspaceId, message as Message);
-    } else {
-      for (const chunk of chunks.slice(1)) {
-        await channel.send(chunk);
-      }
-      this.streamingMessages.delete(workspaceId);
-      this.lastStreamContent.delete(workspaceId);
-    }
+    });
   }
 
   /**
@@ -263,7 +289,13 @@ export class DiscordCommunicator {
       .setColor(colorMap[color])
       .setTimestamp();
 
-    await channel.send({ embeds: [embed] });
+    try {
+      await channel.send({ embeds: [embed] });
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      console.error(`[Communicator] sendEmbed failed for workspace ${workspaceId}:`, err.message);
+      this.debug(`sendEmbed error workspace=${workspaceId.slice(0, 8)}: ${err.message}`);
+    }
   }
 
   /**
@@ -281,7 +313,6 @@ export class DiscordCommunicator {
     }
 
     const fs = await import('fs');
-    const path = await import('path');
 
     if (!fs.existsSync(filePath)) {
       console.error(`[Communicator] File not found: ${filePath}`);
@@ -290,10 +321,16 @@ export class DiscordCommunicator {
 
     const attachment = new AttachmentBuilder(filePath);
 
-    await channel.send({
-      content: content || undefined,
-      files: [attachment],
-    });
+    try {
+      await channel.send({
+        content: content || undefined,
+        files: [attachment],
+      });
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      console.error(`[Communicator] sendFile failed for workspace ${workspaceId}:`, err.message);
+      this.debug(`sendFile error workspace=${workspaceId.slice(0, 8)} path=${filePath}: ${err.message}`);
+    }
   }
 
   /**

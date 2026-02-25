@@ -13,44 +13,34 @@ export interface SquireOutputEventData {
 }
 
 export function sanitizeAssistantStdout(content: string): string {
-  // Remove fully-formed internal tool blocks first
-  let cleaned = content.replace(/```squire-tool[\t ]*\n[\s\S]*?```/g, '');
-
-  // Remove a dangling, unmatched tool fence prefix that can arrive in a separate
-  // chunk (for example: "```" followed by "squire-tool" in the next update).
-  const fenceMatches = [...cleaned.matchAll(/```/g)];
-  if (fenceMatches.length % 2 === 1) {
-    const lastFenceIndex = fenceMatches[fenceMatches.length - 1]?.index ?? -1;
-    if (lastFenceIndex >= 0) {
-      const tail = cleaned.slice(lastFenceIndex + 3);
-      const normalizedTail = tail.trim().toLowerCase();
-      const isSingleLineTail = !tail.includes('\n');
-      const looksLikeToolFencePrefix = 'squire-tool'.startsWith(normalizedTail);
-      if (isSingleLineTail && looksLikeToolFencePrefix) {
-        cleaned = cleaned.slice(0, lastFenceIndex);
-      }
-    }
-  }
-
-  // Remove a trailing in-progress internal tool block during streaming
-  const partialToolBlockStart = cleaned.lastIndexOf('```squire-tool');
-  if (partialToolBlockStart >= 0) {
-    cleaned = cleaned.slice(0, partialToolBlockStart);
-  }
-
-  return cleaned.trim();
+  return content.trim();
 }
 
 export class DiscordOutputRouter {
   private debugEnabled = process.env.SQUIRE_DEBUG_STREAMING === '1';
   private lastStdoutSeen = new Map<string, string>();
   private streamPrefixToStrip = new Map<string, string>();
+  private routeQueues = new Map<string, Promise<void>>();
 
   constructor(private communicator: OutputRouterCommunicator) {}
 
   private debug(message: string): void {
     if (!this.debugEnabled) return;
     console.log(`[StreamDebug][Router] ${message}`);
+  }
+
+  private enqueueWorkspace(workspaceId: string, task: () => Promise<void>): Promise<void> {
+    const previous = this.routeQueues.get(workspaceId) || Promise.resolve();
+    const run = previous.catch(() => undefined).then(task);
+    const settled = run
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.routeQueues.get(workspaceId) === settled) {
+          this.routeQueues.delete(workspaceId);
+        }
+      });
+    this.routeQueues.set(workspaceId, settled);
+    return run;
   }
 
   private getCommonPrefixLength(a: string, b: string): number {
@@ -124,6 +114,15 @@ export class DiscordOutputRouter {
     const workspaceId = data.workspaceId;
     if (!workspaceId) return;
 
+    return this.enqueueWorkspace(workspaceId, () => this.handleOutputSerial(data));
+  }
+
+  private async handleOutputSerial(data: SquireOutputEventData): Promise<void> {
+    const workspaceId = data.workspaceId;
+    if (!workspaceId) return;
+
+    // Track type changes for stdout and in-progress thinking so the transition
+    // from thinking -> stdout starts a fresh message when requested.
     const shouldTrackTypeChange = data.outputType === 'stdout' || !data.isComplete;
     const typeChanged = shouldTrackTypeChange
       ? this.communicator.checkOutputTypeChange(workspaceId, data.outputType)
@@ -131,12 +130,15 @@ export class DiscordOutputRouter {
     if (typeChanged) {
       this.streamPrefixToStrip.delete(workspaceId);
     }
-    this.debug(`output workspace=${workspaceId.slice(0, 8)} type=${data.outputType} complete=${data.isComplete} len=${data.content.length} typeChanged=${typeChanged}`);
 
     if (data.outputType !== 'stdout') {
-      this.debug(`skip non-stdout type=${data.outputType}`);
+      if (typeChanged || data.isComplete) {
+        this.debug(`non-stdout workspace=${workspaceId.slice(0, 8)} type=${data.outputType} complete=${data.isComplete}`);
+      }
       return;
     }
+
+    this.debug(`stdout workspace=${workspaceId.slice(0, 8)} complete=${data.isComplete} len=${data.content.length} typeChanged=${typeChanged}`);
 
     const cleanContent = sanitizeAssistantStdout(data.content);
     if (!cleanContent) {
@@ -216,7 +218,7 @@ export class DiscordOutputRouter {
       return;
     }
 
-    this.debug(`sendText len=${contentToSend.length} complete=${data.isComplete}`);
+    this.debug(`sendText decision=${decision} len=${contentToSend.length} complete=${data.isComplete}`);
     await this.communicator.sendText(workspaceId, contentToSend, data.isComplete);
 
     if (data.isComplete) {
@@ -227,23 +229,29 @@ export class DiscordOutputRouter {
 
   handleToolUse(workspaceId?: string): void {
     if (workspaceId) {
-      this.debug(`tool_use clear streaming workspace=${workspaceId.slice(0, 8)}`);
-      this.communicator.clearStreamingState(workspaceId);
-      this.streamPrefixToStrip.delete(workspaceId);
+      void this.enqueueWorkspace(workspaceId, async () => {
+        this.debug(`tool_use clear streaming workspace=${workspaceId.slice(0, 8)}`);
+        this.communicator.clearStreamingState(workspaceId);
+        this.streamPrefixToStrip.delete(workspaceId);
+      });
     }
   }
 
   handleComplete(workspaceId?: string): void {
     if (workspaceId) {
-      this.debug(`complete workspace=${workspaceId.slice(0, 8)} (defer stream clear)`);
+      void this.enqueueWorkspace(workspaceId, async () => {
+        this.debug(`complete workspace=${workspaceId.slice(0, 8)} (defer stream clear)`);
+      });
     }
   }
 
   handleApprovalRequired(workspaceId?: string): void {
     if (workspaceId) {
-      this.debug(`approval_required clear streaming workspace=${workspaceId.slice(0, 8)}`);
-      this.communicator.clearStreamingState(workspaceId);
-      this.streamPrefixToStrip.delete(workspaceId);
+      void this.enqueueWorkspace(workspaceId, async () => {
+        this.debug(`approval_required clear streaming workspace=${workspaceId.slice(0, 8)}`);
+        this.communicator.clearStreamingState(workspaceId);
+        this.streamPrefixToStrip.delete(workspaceId);
+      });
     }
   }
 

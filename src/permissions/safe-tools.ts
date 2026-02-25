@@ -337,6 +337,10 @@ export function shouldAutoApproveInSafeMode(
   toolName: string,
   input: Record<string, unknown> | undefined
 ): boolean {
+  if (isSquireNativeTool(toolName)) {
+    return true;
+  }
+
   // AskUserQuestion should NEVER be auto-approved - it requires actual user input
   if (toolName === 'AskUserQuestion') {
     return false;
@@ -381,4 +385,20 @@ export function shouldAutoApproveInSafeMode(
 
   // All other tools require approval
   return false;
+}
+
+/**
+ * Returns true when a tool name maps to Squire-owned native tools (typically via MCP).
+ */
+export function isSquireNativeTool(toolName: string | undefined): boolean {
+  if (!toolName || typeof toolName !== 'string') {
+    return false;
+  }
+
+  const normalized = toolName.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  return normalized.startsWith('mcp__squire__') || normalized.startsWith('squire_');
 }

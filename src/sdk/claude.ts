@@ -14,7 +14,9 @@ import {
   ToolUseEvent,
   ApprovalEvent,
 } from './types.js';
-import { shouldAutoApproveInSafeMode, getDangerousReason } from '../permissions/safe-tools.js';
+import { shouldAutoApproveInSafeMode, getDangerousReason, isSquireNativeTool } from '../permissions/safe-tools.js';
+import { appendFileSync, mkdirSync } from 'fs';
+import { dirname } from 'path';
 
 
 
@@ -26,6 +28,9 @@ import { shouldAutoApproveInSafeMode, getDangerousReason } from '../permissions/
  */
 export class ClaudeSDKClient extends BaseSDKClient {
   readonly provider = 'claude';
+  private rawJsonlFile = process.env.SQUIRE_DEBUG_RAW_JSONL_FILE || process.env.SQUIRE_DEBUG_RAW_JSONL_PATH || '';
+  private rawJsonlEnabled = process.env.SQUIRE_DEBUG_RAW_JSONL === '1' || this.rawJsonlFile.length > 0;
+  private rawJsonlStdout = process.env.SQUIRE_DEBUG_RAW_JSONL_STDOUT === '1';
   private client: any = null;
   private emittedToolUseIds = new Set<string>();
 
@@ -38,6 +43,14 @@ export class ClaudeSDKClient extends BaseSDKClient {
     try {
       // Dynamic import to handle missing package gracefully
       const { ClaudeClient } = await import('@raylin01/claude-client');
+      const mcpServers = { ...(this.config.mcpServers || {}) };
+      if (this.config.toolBridge) {
+        mcpServers[this.config.toolBridge.serverName] = {
+          command: this.config.toolBridge.command,
+          args: this.config.toolBridge.args,
+          env: this.config.toolBridge.env,
+        };
+      }
 
       const permissionMode = this.config.permissionMode === 'permissive'
         ? 'acceptEdits'
@@ -54,7 +67,7 @@ export class ClaudeSDKClient extends BaseSDKClient {
         model: this.config.model,
         resumeSessionId: this.config.resumeSessionId,
         permissionMode,
-        mcpServers: this.config.mcpServers,
+        mcpServers,
       });
 
       this.setupEventListeners();
@@ -69,11 +82,94 @@ export class ClaudeSDKClient extends BaseSDKClient {
     }
   }
 
+  private safeStringify(value: unknown): string {
+    try {
+      return JSON.stringify(value, (_key, current) =>
+        typeof current === 'bigint' ? current.toString() : current
+      );
+    } catch {
+      return JSON.stringify({ note: 'unserializable payload' });
+    }
+  }
+
+  private logRawJsonl(kind: string, payload: unknown): void {
+    if (!this.rawJsonlEnabled) return;
+
+    const line = this.safeStringify({
+      ts: new Date().toISOString(),
+      provider: this.provider,
+      sessionId: this.client?.sessionId || this.config.resumeSessionId || null,
+      kind,
+      payload,
+    });
+
+    if (this.rawJsonlStdout) {
+      console.log(`[StreamDebug][RawJSONL] ${line}`);
+    }
+
+    if (!this.rawJsonlFile) return;
+    try {
+      mkdirSync(dirname(this.rawJsonlFile), { recursive: true });
+      appendFileSync(this.rawJsonlFile, `${line}\n`, 'utf8');
+    } catch (error) {
+      console.warn('[ClaudeSDK] Failed to append raw JSONL debug log:', error);
+      this.rawJsonlFile = '';
+    }
+  }
+
+  /**
+   * Sends a control response using the canonical top-level shape first.
+   * Falls back to the client helper for compatibility with older wrappers.
+   */
+  private async sendControlResponse(
+    requestId: string,
+    responseData: { behavior: 'allow' | 'deny'; updatedInput?: Record<string, unknown>; message?: string }
+  ): Promise<void> {
+    if (!this.client) {
+      throw new Error('Claude client not initialized');
+    }
+
+    let sent = false;
+
+    // Newer Claude protocol shape.
+    const directWriter = this.client.writeToStdin;
+    if (typeof directWriter === 'function') {
+      try {
+        await directWriter.call(this.client, {
+          type: 'control_response',
+          request_id: requestId,
+          subtype: 'success',
+          response: responseData,
+        });
+        sent = true;
+      } catch (error) {
+        if (this.config.debug) {
+          console.warn('[ClaudeSDK] Direct control_response failed:', error);
+        }
+      }
+    }
+
+    // Compatibility for wrappers expecting nested envelope form.
+    try {
+      await this.client.sendControlResponse(requestId, responseData);
+      sent = true;
+    } catch (error) {
+      if (this.config.debug) {
+        console.warn('[ClaudeSDK] Envelope control_response failed:', error);
+      }
+    }
+
+    if (!sent) {
+      throw new Error('Failed to send control_response in any supported shape.');
+    }
+  }
+
   private setupEventListeners(): void {
     if (!this.client) return;
 
     // Map client events to our unified interface
     this.client.on('system', (msg: any) => {
+      this.logRawJsonl('system', msg);
       this.emit('metadata', {
         model: msg.model,
         permissionMode: msg.permissionMode,
@@ -84,16 +180,19 @@ export class ClaudeSDKClient extends BaseSDKClient {
     // text_accumulated: full accumulated assistant text output
     // Using accumulated mode (like DisCode) for reliable streaming
     this.client.on('text_accumulated', (accumulatedText: string) => {
+      this.logRawJsonl('text_accumulated', { accumulatedText });
       this.outputThrottler.addStdout(accumulatedText);
     });
 
     // thinking_accumulated: full accumulated thinking output
     this.client.on('thinking_accumulated', (accumulatedThinking: string) => {
+      this.logRawJsonl('thinking_accumulated', { accumulatedThinking });
       this.outputThrottler.addThinking(accumulatedThinking);
     });
 
     // Stream-level tool boundary (fires as soon as tool block is parsed)
     this.client.on('tool_use_start', (tool: any) => {
+      this.logRawJsonl('tool_use_start', tool);
       // Flush any buffered text/thinking first so tool boundary ordering is preserved.
       this.outputThrottler.flush(false);
       const toolId = String(tool?.id || '');
@@ -111,6 +210,7 @@ export class ClaudeSDKClient extends BaseSDKClient {
 
     // message: full assistant message object (for tool_use events)
     this.client.on('message', (msg: any) => {
+      this.logRawJsonl('message', msg);
       for (const block of msg?.content || []) {
         if (block.type === 'tool_use') {
           // Flush any buffered text/thinking first so tool boundary ordering is preserved.
@@ -132,25 +232,28 @@ export class ClaudeSDKClient extends BaseSDKClient {
     });
 
     this.client.on('control_request', (msg: any) => {
+      this.logRawJsonl('control_request', msg);
       if (msg.request?.subtype === 'can_use_tool') {
         const approvalId = msg.request_id;
         const toolName = msg.request.tool_name || 'unknown';
         const input = msg.request.input || {};
+        const squireNativeTool = isSquireNativeTool(toolName);
 
         // Check if auto-approval is enabled (autoSafe or permissive mode)
         const permissionMode = this.config.permissionMode;
-        const shouldAutoApprove = permissionMode === 'permissive' ||
+        const shouldAutoApprove = squireNativeTool ||
+          permissionMode === 'permissive' ||
           (permissionMode === 'autoSafe' && shouldAutoApproveInSafeMode(toolName, input));
 
         if (shouldAutoApprove) {
           // Auto-approve safe operations
-          console.log(`[ClaudeSDK] Auto-approving: ${toolName} (mode: ${permissionMode})`);
+          console.log(`[ClaudeSDK] Auto-approving: ${toolName} (mode: ${permissionMode}${squireNativeTool ? ', squire-native' : ''})`);
           const responseData = {
-            behavior: 'allow',
+            behavior: 'allow' as const,
             updatedInput: input,
             message: 'Auto-approved'
           };
-          this.client.sendControlResponse(approvalId, responseData).catch((err: Error) => {
+          this.sendControlResponse(approvalId, responseData).catch((err: Error) => {
             console.warn('[ClaudeSDK] Error sending auto-approval:', err);
           });
           return;
@@ -183,6 +286,7 @@ export class ClaudeSDKClient extends BaseSDKClient {
     });
 
     this.client.on('result', () => {
+      this.logRawJsonl('result', { event: 'result' });
       this.emittedToolUseIds.clear();
       this.setStatus('idle');
       this.outputThrottler.flush(true);
@@ -190,6 +294,7 @@ export class ClaudeSDKClient extends BaseSDKClient {
     });
 
     this.client.on('error', (error: Error) => {
+      this.logRawJsonl('error', { message: error.message, stack: error.stack });
       this.emitError(error);
     });
   }
@@ -204,11 +309,14 @@ export class ClaudeSDKClient extends BaseSDKClient {
     }
 
     this.setStatus('working');
+    this.logRawJsonl('sendMessage.input', { message });
 
     try {
       // Use the client's sendMessage method
       await this.client.sendMessage(message.content);
+      this.logRawJsonl('sendMessage.accepted', { messageLength: message.content.length });
     } catch (error) {
+      this.logRawJsonl('sendMessage.error', { error: String(error) });
       console.error('[ClaudeSDK] Error sending message:', error);
       this.emitError(error instanceof Error ? error : new Error(String(error)));
       throw error;
@@ -219,12 +327,15 @@ export class ClaudeSDKClient extends BaseSDKClient {
     if (!this.client) return;
 
     try {
+      this.logRawJsonl('sendToolResult.input', result);
       await this.client.sendToolResult({
         toolUseId: result.toolUseId,
         content: result.content,
         isError: result.isError,
       });
+      this.logRawJsonl('sendToolResult.accepted', { toolUseId: result.toolUseId });
     } catch (error) {
+      this.logRawJsonl('sendToolResult.error', { error: String(error) });
       console.warn('[ClaudeSDK] Error sending tool result:', error);
     }
   }
@@ -234,6 +345,7 @@ export class ClaudeSDKClient extends BaseSDKClient {
     decision: 'allow' | 'deny',
     updatedInput?: Record<string, unknown>
   ): Promise<void> {
+    this.logRawJsonl('sendApproval.input', { requestId, decision, updatedInput });
     console.log(`[ClaudeSDK] sendApproval called: requestId=${requestId}, decision=${decision}`);
     if (!this.client) {
       console.warn(`[ClaudeSDK] sendApproval failed: client not initialized`);
@@ -248,16 +360,18 @@ export class ClaudeSDKClient extends BaseSDKClient {
 
     try {
       const responseData = decision === 'allow'
-        ? { behavior: 'allow', updatedInput }
-        : { behavior: 'deny', message: 'Denied by user' };
+        ? { behavior: 'allow' as const, updatedInput, message: 'Approved' }
+        : { behavior: 'deny' as const, message: 'Denied by user' };
 
-      await this.client.sendControlResponse(requestId, responseData);
+      await this.sendControlResponse(requestId, responseData);
+      this.logRawJsonl('sendApproval.accepted', { requestId, decision });
       this.approvalTracker.delete(requestId);
 
       if (this.approvalTracker.size() === 0) {
         this.setStatus('working');
       }
     } catch (error) {
+      this.logRawJsonl('sendApproval.error', { requestId, decision, error: String(error) });
       console.warn('[ClaudeSDK] Error sending approval:', error);
     }
   }

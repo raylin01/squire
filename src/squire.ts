@@ -5,8 +5,10 @@
  */
 
 import { EventEmitter } from 'events';
+import http from 'http';
 import path from 'path';
 import fs from 'fs';
+import { fileURLToPath } from 'url';
 import { v4 as uuid } from 'uuid';
 import type {
   SquireConfig,
@@ -38,9 +40,20 @@ import { Scheduler, createScheduler } from './scheduler/index.js';
 import { TicketManager, createTicketManager } from './tickets/index.js';
 import { PersonalityManager, createPersonalityManager } from './personality/index.js';
 import { toolRegistry, setCommunicationHandler, communicate, setSelfManageState, setMemoryManager as setToolMemoryManager, setScheduler as setToolScheduler, setSchedulerWorkspaceAccessors, setTicketManager as setToolTicketManager, setSquireInstance, setExecutionContext, clearExecutionContext, getExecutionContext } from './tools/index.js';
+import { createToolLoader } from './tools/loader.js';
 import { checkBashPermission, checkToolPermission } from './permissions/index.js';
 import { addLearnedPattern } from './permissions/learned-patterns.js';
 import { WorkspaceSession } from './workspace-session.js';
+import type { SDKTool, MCPServerConfig, NativeToolBridgeConfig } from './sdk/types.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+interface ToolBridgeRequestBody {
+  toolName?: string;
+  input?: Record<string, unknown>;
+  workspaceId?: string;
+}
 
 /**
  * Squire - The main personal AI assistant class
@@ -65,6 +78,11 @@ export class Squire extends EventEmitter {
   // Heartbeat/activity tracking
   private lastHeartbeat: Date = new Date();
   private currentActivity: string = 'idle';
+
+  // Native tool bridge (MCP -> local tool registry)
+  private toolBridgeServer: http.Server | null = null;
+  private toolBridgeUrl: string | null = null;
+  private toolBridgeToken: string | null = null;
 
   constructor(config: Partial<SquireConfig> & { squireId: string }) {
     super();
@@ -138,11 +156,6 @@ export class Squire extends EventEmitter {
     // Load existing workspaces from storage
     await this.loadWorkspaces();
 
-    // Create workspace sessions for loaded workspaces (SDK is lazy-initialized per workspace)
-    for (const [workspaceId, workspace] of this.workspaces) {
-      this.createWorkspaceSession(workspace);
-    }
-
     // Initialize memory system (use hybrid memory manager)
     if (this.config.memory.enabled) {
       try {
@@ -173,6 +186,10 @@ export class Squire extends EventEmitter {
       console.error('[Squire] Failed to initialize skills system:', error);
       this.skillManager = null;
     }
+
+    // Load external tools and expose full toolset to SDK providers.
+    await this.initializeToolRegistry();
+    await this.startNativeToolBridge();
 
     // Initialize ticket manager
     const ticketsDbPath = path.join(this.config.dataDir, 'tickets.db');
@@ -220,6 +237,11 @@ export class Squire extends EventEmitter {
       console.log('[Squire] Scheduler started (daemon mode)');
     }
 
+    // Create workspace sessions for loaded workspaces (SDK is lazy-initialized per workspace)
+    for (const workspace of this.workspaces.values()) {
+      this.createWorkspaceSession(workspace);
+    }
+
     // Set squire instance for self-modification tools
     setSquireInstance({
       getConfig: () => this.config,
@@ -232,31 +254,193 @@ export class Squire extends EventEmitter {
     console.log(`[Squire] ${this.config.name} started successfully`);
   }
 
+  private async initializeToolRegistry(): Promise<void> {
+    try {
+      const loader = createToolLoader({
+        globalDir: this.config.tools.globalDir,
+        projectDir: this.config.tools.projectDir,
+      });
+      toolRegistry.setToolLoader(loader);
+      const loaded = await toolRegistry.loadExternalTools();
+      console.log(`[Squire] Tools initialized (${toolRegistry.getAll().length} total, ${loaded.length} external)`);
+    } catch (error) {
+      console.error('[Squire] Failed to initialize external tools:', error);
+      throw error;
+    }
+  }
+
+  private async startNativeToolBridge(): Promise<void> {
+    if (this.toolBridgeServer) {
+      return;
+    }
+
+    this.toolBridgeToken = uuid();
+
+    const server = http.createServer((req, res) => {
+      if (!req.url || req.method !== 'POST' || req.url !== '/execute') {
+        res.statusCode = 404;
+        res.end();
+        return;
+      }
+
+      const authHeader = req.headers.authorization || '';
+      const expected = `Bearer ${this.toolBridgeToken}`;
+      if (authHeader !== expected) {
+        res.statusCode = 401;
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({ ok: false, error: 'Unauthorized' }));
+        return;
+      }
+
+      let body = '';
+      req.on('data', (chunk: Buffer) => {
+        body += chunk.toString('utf8');
+        if (body.length > 1_000_000) {
+          req.destroy();
+        }
+      });
+
+      req.on('end', async () => {
+        let payload: ToolBridgeRequestBody;
+        try {
+          payload = body ? JSON.parse(body) as ToolBridgeRequestBody : {};
+        } catch {
+          res.statusCode = 400;
+          res.setHeader('content-type', 'application/json');
+          res.end(JSON.stringify({ ok: false, error: 'Invalid JSON body' }));
+          return;
+        }
+
+        const toolName = String(payload.toolName || '').trim();
+        const input = (payload.input && typeof payload.input === 'object')
+          ? payload.input as Record<string, unknown>
+          : {};
+        const workspaceId = payload.workspaceId ? String(payload.workspaceId) : undefined;
+
+        if (!toolName || !toolRegistry.has(toolName)) {
+          res.statusCode = 404;
+          res.setHeader('content-type', 'application/json');
+          res.end(JSON.stringify({ ok: false, error: `Unknown tool: ${toolName}` }));
+          return;
+        }
+
+        try {
+          console.log(`[Squire][ToolBridge] Executing ${toolName} (workspace: ${workspaceId || 'none'})`);
+          setExecutionContext({ workspaceId });
+          const result = await Promise.race([
+            toolRegistry.execute(toolName, input),
+            new Promise<string>((_, reject) => {
+              setTimeout(() => reject(new Error(`Tool execution timeout: ${toolName}`)), 30_000);
+            }),
+          ]);
+          res.statusCode = 200;
+          res.setHeader('content-type', 'application/json');
+          res.end(JSON.stringify({ ok: true, result }));
+          console.log(`[Squire][ToolBridge] Completed ${toolName}`);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          res.statusCode = 500;
+          res.setHeader('content-type', 'application/json');
+          res.end(JSON.stringify({ ok: false, error: message }));
+          console.error(`[Squire][ToolBridge] Failed ${toolName}: ${message}`);
+        } finally {
+          clearExecutionContext();
+        }
+      });
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', () => resolve());
+    });
+
+    const address = server.address();
+    if (!address || typeof address === 'string') {
+      server.close();
+      throw new Error('Failed to determine tool bridge listen address.');
+    }
+
+    this.toolBridgeServer = server;
+    this.toolBridgeUrl = `http://127.0.0.1:${address.port}`;
+    console.log(`[Squire] Native tool bridge listening at ${this.toolBridgeUrl}`);
+  }
+
+  private async stopNativeToolBridge(): Promise<void> {
+    if (!this.toolBridgeServer) {
+      return;
+    }
+
+    const server = this.toolBridgeServer;
+    this.toolBridgeServer = null;
+    this.toolBridgeUrl = null;
+    this.toolBridgeToken = null;
+
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+    });
+  }
+
+  private buildWorkspaceToolRuntime(workspaceId: string): {
+    tools: SDKTool[];
+    mcpServers: Record<string, MCPServerConfig>;
+    toolBridge?: NativeToolBridgeConfig;
+  } {
+    const tools = toolRegistry.getToolDefinitions();
+    const configuredMcpServers = { ...(this.config.sdk.mcpServers || {}) } as Record<string, MCPServerConfig>;
+
+    const mcpServerScriptPath = path.join(__dirname, 'mcp', 'squire-tool-mcp-server.js');
+    if (!fs.existsSync(mcpServerScriptPath)) {
+      throw new Error(`Missing MCP bridge server script: ${mcpServerScriptPath}`);
+    }
+
+    let toolBridge: NativeToolBridgeConfig | undefined;
+    if (this.toolBridgeUrl && this.toolBridgeToken && tools.length > 0) {
+      toolBridge = {
+        serverName: 'squire',
+        command: process.execPath,
+        args: [mcpServerScriptPath],
+        env: {
+          SQUIRE_TOOL_BRIDGE_URL: this.toolBridgeUrl,
+          SQUIRE_TOOL_BRIDGE_TOKEN: this.toolBridgeToken,
+          SQUIRE_TOOL_WORKSPACE_ID: workspaceId,
+          SQUIRE_TOOL_DEFINITIONS_JSON: JSON.stringify(tools),
+        },
+      };
+
+      configuredMcpServers[toolBridge.serverName] = {
+        command: toolBridge.command,
+        args: toolBridge.args,
+        env: toolBridge.env,
+      };
+    }
+
+    return { tools, mcpServers: configuredMcpServers, toolBridge };
+  }
+
   /**
    * Create a workspace session with its own SDK client
    */
   private createWorkspaceSession(workspace: Workspace): WorkspaceSession {
+    const runtime = this.buildWorkspaceToolRuntime(workspace.workspaceId);
     const session = new WorkspaceSession(workspace, {
       provider: this.config.sdk.provider,
       permissionMode: this.config.permissions.mode,
       model: this.config.sdk.model || this.config.model,
       cliPath: this.config.sdk.cliPath,
+      tools: runtime.tools,
+      mcpServers: runtime.mcpServers,
+      toolBridge: runtime.toolBridge,
+      runtimeDir: path.join(this.config.dataDir, 'runtime', workspace.workspaceId),
     });
 
     // Set up event forwarding from session to Squire events
     session.on('output', async (output) => {
       this.lastHeartbeat = new Date();
 
-      // Process tool calls from output (when complete)
-      let processedContent = output.content;
-      if (output.isComplete && output.outputType === 'stdout') {
-        processedContent = await this.processToolCalls(output.content, output.workspaceId);
-      }
-
       // Emit output event for Discord routing
       this.emitEvent('output', {
         workspaceId: output.workspaceId,
-        content: processedContent,
+        content: output.content,
         outputType: output.outputType || 'stdout',
         isComplete: output.isComplete || false,
       });
@@ -310,6 +494,14 @@ export class Squire extends EventEmitter {
       if (workspace) {
         session = this.createWorkspaceSession(workspace);
       }
+    } else {
+      const runtime = this.buildWorkspaceToolRuntime(workspaceId);
+      session.setToolRuntime({
+        tools: runtime.tools,
+        mcpServers: runtime.mcpServers,
+        toolBridge: runtime.toolBridge,
+        runtimeDir: path.join(this.config.dataDir, 'runtime', workspaceId),
+      });
     }
     return session;
   }
@@ -380,6 +572,9 @@ export class Squire extends EventEmitter {
     if (this.memoryManager) {
       await this.memoryManager.close();
     }
+
+    // Stop native tool bridge
+    await this.stopNativeToolBridge();
 
     // Save workspaces
     await this.saveWorkspaces();
@@ -670,182 +865,6 @@ export class Squire extends EventEmitter {
   // ==========================================================================
 
   /**
-   * Build tool documentation for the AI to understand available tools
-   */
-  private buildToolContext(): string {
-    const tools = toolRegistry.getAll();
-    if (tools.length === 0) {
-      return '';
-    }
-
-    const lines = ['[Squire Tools - Call by including a tool block in your response]'];
-    lines.push('');
-    lines.push('[IMPORTANT: Discord Communication]');
-    lines.push('Your regular text output IS automatically sent to Discord.');
-    lines.push('Just respond normally - no special tool needed for messages.');
-    lines.push('');
-    lines.push('squire_communicate is OPTIONAL and only for special cases:');
-    lines.push('- Sending embeds (colored status cards)');
-    lines.push('- Sending files');
-    lines.push('- Pinging the user');
-    lines.push('');
-    lines.push('Tool format:');
-    lines.push('```squire-tool');
-    lines.push('tool_name: <name>');
-    lines.push('param1: value1');
-    lines.push('```');
-    lines.push('');
-    lines.push('Example - embed for status updates:');
-    lines.push('```squire-tool');
-    lines.push('tool_name: squire_communicate');
-    lines.push('type: embed');
-    lines.push('title: Task Complete');
-    lines.push('content: Description here');
-    lines.push('color: green');
-    lines.push('```');
-    lines.push('');
-    lines.push('Colors: green, red, yellow, blue, orange, purple');
-    lines.push('');
-
-    lines.push('Available tools:');
-
-    for (const tool of tools) {
-      // Get the first paragraph of description (the summary)
-      const descLines = tool.description.split('\n');
-      const summary = descLines[0];
-      const params = Object.keys(tool.inputSchema.properties || {}).join(', ');
-      lines.push(`- ${tool.name}(${params}): ${summary}`);
-    }
-
-    // Add specific guidance for memory tools
-    lines.push('');
-    lines.push('[Memory Guidance]');
-    lines.push('- Proactively record things you learn about the user');
-    lines.push('- Use memory_remember_preference when user states a preference');
-    lines.push('- Use memory_remember_fact when user shares personal info');
-    lines.push('- Use memory_search when user asks about past events');
-
-    return lines.join('\n');
-  }
-
-  /**
-   * Parse and execute tool calls from AI output
-   * Returns the output with tool blocks removed
-   */
-  private async processToolCalls(content: string, workspaceId?: string): Promise<string> {
-    const toolBlockRegex = /```squire-tool\n([\s\S]*?)```/g;
-    let result = content;
-    const scheduleToolResults: string[] = [];
-    let match;
-
-    while ((match = toolBlockRegex.exec(content)) !== null) {
-      const block = match[1];
-      const params = this.parseToolBlock(block);
-      const toolName = params.tool_name as string || '';
-      delete params.tool_name;
-
-      if (toolName && toolRegistry.has(toolName)) {
-        try {
-          console.log(`[Squire] Executing tool: ${toolName} (workspace: ${workspaceId?.slice(0, 8)}...)`);
-          // Set execution context so tools know which workspace they're responding to
-          setExecutionContext({ workspaceId });
-          const toolResult = await toolRegistry.execute(toolName, params);
-          if (toolName.startsWith('schedule_')) {
-            const trimmed = String(toolResult || '').trim();
-            if (trimmed) {
-              scheduleToolResults.push(trimmed);
-            }
-          }
-          // Remove the tool block from output
-          result = result.replace(match[0], '');
-        } catch (error) {
-          console.error(`[Squire] Tool execution failed: ${toolName}`, error);
-        } finally {
-          clearExecutionContext();
-        }
-      }
-    }
-
-    const cleaned = result.trim();
-    if (!cleaned && scheduleToolResults.length > 0) {
-      return scheduleToolResults.join('\n\n');
-    }
-    return cleaned;
-  }
-
-  /**
-   * Parse a tool block into parameters
-   * Handles multi-line values using YAML-style | block scalars
-   */
-  private parseToolBlock(block: string): Record<string, unknown> {
-    const params: Record<string, unknown> = {};
-    const lines = block.trim().split('\n');
-    let currentKey: string | null = null;
-    let currentValue: string[] = [];
-    let isBlockScalar = false;
-
-    const saveCurrentParam = () => {
-      if (currentKey) {
-        let value: string;
-        if (isBlockScalar && currentValue.length > 0) {
-          // Join block scalar lines, preserving newlines
-          value = currentValue.join('\n');
-        } else if (currentValue.length === 1) {
-          value = currentValue[0];
-        } else {
-          value = currentValue.join('\n');
-        }
-        // Try to parse as JSON, fall back to string
-        try {
-          params[currentKey] = JSON.parse(value);
-        } catch {
-          params[currentKey] = value;
-        }
-      }
-      currentKey = null;
-      currentValue = [];
-      isBlockScalar = false;
-    };
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      const colonIdx = line.indexOf(':');
-
-      // Check if this is a new key-value pair (not indented, has colon)
-      if (colonIdx > 0 && !line.slice(0, colonIdx).includes(' ') && !line.startsWith(' ') && !line.startsWith('\t')) {
-        // Save previous param
-        saveCurrentParam();
-
-        currentKey = line.slice(0, colonIdx).trim();
-        const valuePart = line.slice(colonIdx + 1).trim();
-
-        // Check if this is a block scalar (value is just |)
-        if (valuePart === '|') {
-          isBlockScalar = true;
-          currentValue = [];
-        } else if (valuePart) {
-          currentValue = [valuePart];
-        } else {
-          currentValue = [];
-        }
-      } else if (currentKey && (line.startsWith(' ') || line.startsWith('\t'))) {
-        // This is a continuation line (indented)
-        currentValue.push(line.trim());
-      } else if (currentKey && line.trim() === '') {
-        // Empty line in block scalar
-        if (isBlockScalar) {
-          currentValue.push('');
-        }
-      }
-    }
-
-    // Save last param
-    saveCurrentParam();
-
-    return params;
-  }
-
-  /**
    * Send a message to a workspace
    */
   async sendMessage(workspaceId: string, content: string): Promise<SquireMessage> {
@@ -867,12 +886,6 @@ export class Squire extends EventEmitter {
 
     // Build message with compact context
     let contextContent = content;
-
-    // Add tool documentation so AI knows what's available
-    const toolContext = this.buildToolContext();
-    if (toolContext) {
-      contextContent = `${toolContext}\n\n${contextContent}`;
-    }
 
     // Add working directory context if workspace has a project path
     if (workspace.context?.projectPath) {
@@ -951,12 +964,6 @@ export class Squire extends EventEmitter {
     // Build message with compact context
     let contextContent = content;
 
-    // Add tool documentation so AI knows what's available
-    const toolContext = this.buildToolContext();
-    if (toolContext) {
-      contextContent = `${toolContext}\n\n${contextContent}`;
-    }
-
     // Add working directory context if workspace has a project path
     if (workspace.context?.projectPath) {
       contextContent = `[Working directory: ${workspace.context.projectPath}]\n\n${contextContent}`;
@@ -1034,6 +1041,7 @@ export class Squire extends EventEmitter {
     // Check if this is a built-in Squire tool
     if (toolRegistry.has(event.toolName)) {
       try {
+        setExecutionContext({ workspaceId: event.workspaceId });
         const result = await toolRegistry.execute(event.toolName, event.input);
         await session.sendToolResult({
           toolUseId: event.toolId,
@@ -1045,6 +1053,8 @@ export class Squire extends EventEmitter {
           content: `Error: ${error instanceof Error ? error.message : String(error)}`,
           isError: true,
         });
+      } finally {
+        clearExecutionContext();
       }
     }
     // For bash commands, check permissions

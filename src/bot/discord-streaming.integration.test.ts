@@ -42,12 +42,25 @@ class FakeChannel {
 class DelayedFakeChannel extends FakeChannel {
   private resolver: ((msg: FakeMessage) => void) | null = null;
   private pendingContent: string | null = null;
+  private pendingWaiters: Array<() => void> = [];
 
   async send(payload: string | { content?: string }): Promise<FakeMessage> {
     const content = typeof payload === 'string' ? payload : (payload.content || '');
     this.pendingContent = content;
+    this.pendingWaiters.splice(0).forEach(waiter => waiter());
     return new Promise<FakeMessage>((resolve) => {
       this.resolver = resolve;
+    });
+  }
+
+  async waitForPendingSend(timeoutMs: number = 1000): Promise<void> {
+    if (this.resolver) return;
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Timed out waiting for pending send')), timeoutMs);
+      this.pendingWaiters.push(() => {
+        clearTimeout(timer);
+        resolve();
+      });
     });
   }
 
@@ -60,6 +73,12 @@ class DelayedFakeChannel extends FakeChannel {
     this.resolver = null;
     this.pendingContent = null;
     resolve(msg);
+  }
+}
+
+class ErrorChannel extends FakeChannel {
+  async send(_payload: string | { content?: string }): Promise<FakeMessage> {
+    throw new Error('UND_ERR_CONNECT_TIMEOUT');
   }
 }
 
@@ -100,7 +119,7 @@ describe('Discord streaming integration', () => {
     expect(channel.sends.join('')).toBe(content);
   });
 
-  it('routes stdout only, strips squire-tool content, and starts a new message after type change', async () => {
+  it('routes stdout only and starts a new message after type change', async () => {
     const channel = new FakeChannel();
     const communicator = createCommunicator(channel);
     const router = new DiscordOutputRouter(communicator);
@@ -115,7 +134,7 @@ describe('Discord streaming integration', () => {
     await router.handleOutput({
       workspaceId: 'ws-1',
       outputType: 'stdout',
-      content: 'Start\n```squire-tool\ntool_name: x',
+      content: 'Start\n```json\n{"tool":"x"}\n```',
       isComplete: false,
     });
 
@@ -129,15 +148,15 @@ describe('Discord streaming integration', () => {
     await router.handleOutput({
       workspaceId: 'ws-1',
       outputType: 'stdout',
-      content: 'Next response\n```squire-tool\ntool_name: y\ndescription: internal\n```',
+      content: 'Next response\n```txt\ninternal\n```',
       isComplete: false,
     });
 
-    expect(channel.sends).toEqual(['Start', 'Next response']);
-    expect(channel.sends.join('\n')).not.toContain('squire-tool');
+    expect(channel.sends).toEqual(['Start', 'Next response\n```txt\ninternal\n```']);
+    expect(channel.messages[0]?.content).toContain('```json');
   });
 
-  it('does not emit dangling markdown fence when squire-tool marker is split across chunks', async () => {
+  it('preserves markdown fences across chunked updates', async () => {
     const channel = new FakeChannel();
     const communicator = createCommunicator(channel);
     const router = new DiscordOutputRouter(communicator);
@@ -152,11 +171,12 @@ describe('Discord streaming integration', () => {
     await router.handleOutput({
       workspaceId: 'ws-1',
       outputType: 'stdout',
-      content: '```squire-tool\ntool_name: schedule_list\n```',
+      content: '```ts\nconst value = 1;\n```',
       isComplete: true,
     });
 
-    expect(channel.sends).toEqual([]);
+    expect(channel.sends).toEqual(['```']);
+    expect(channel.messages[0]?.content).toBe('```ts\nconst value = 1;\n```');
   });
 
   it('breaks stream on tool use so post-tool stdout starts a new Discord message', async () => {
@@ -353,6 +373,7 @@ describe('Discord streaming integration', () => {
     const router = new DiscordOutputRouter(communicator);
 
     const firstSend = communicator.sendText('ws-1', 'transient', false);
+    await channel.waitForPendingSend();
     router.handleToolUse('ws-1');
     channel.resolveSend();
     await firstSend;
@@ -363,6 +384,7 @@ describe('Discord streaming integration', () => {
       content: 'final message',
       isComplete: false,
     });
+    await channel.waitForPendingSend();
     channel.resolveSend();
     await secondSend;
 
@@ -494,5 +516,42 @@ describe('Discord streaming integration', () => {
       'Let me know if there',
       'there\'s anything else you\'d like me to help with!',
     ]);
+  });
+
+  it('serializes concurrent stdout updates so partial prefix is edited instead of sent as a new message', async () => {
+    const channel = new DelayedFakeChannel();
+    const communicator = createCommunicator(channel);
+    const router = new DiscordOutputRouter(communicator);
+
+    const first = router.handleOutput({
+      workspaceId: 'ws-1',
+      outputType: 'stdout',
+      content: 'Let me',
+      isComplete: false,
+    });
+
+    const second = router.handleOutput({
+      workspaceId: 'ws-1',
+      outputType: 'stdout',
+      content: 'Let me generate a nice long speech for you using the default voice!',
+      isComplete: false,
+    });
+
+    await channel.waitForPendingSend();
+    channel.resolveSend();
+    await Promise.all([first, second]);
+
+    expect(channel.sends).toEqual(['Let me']);
+    expect(channel.messages[0]?.content).toBe('Let me generate a nice long speech for you using the default voice!');
+    expect(channel.messages[0]?.edits).toEqual([
+      'Let me generate a nice long speech for you using the default voice!',
+    ]);
+  });
+
+  it('does not throw when Discord send fails with a network timeout', async () => {
+    const channel = new ErrorChannel();
+    const communicator = createCommunicator(channel);
+
+    await expect(communicator.sendText('ws-1', 'hello world', true)).resolves.toBeUndefined();
   });
 });

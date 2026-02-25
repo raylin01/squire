@@ -106,6 +106,14 @@ export interface SDKConfig {
   model?: string;
   cliPath?: string;
   resumeSessionId?: string;
+  mcpServers?: Record<string, {
+    command: string;
+    args?: string[];
+    env?: Record<string, string>;
+    cwd?: string;
+    url?: string;
+    type?: 'stdio' | 'sse' | 'http';
+  }>;
 }
 
 // ============================================================================

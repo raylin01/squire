@@ -313,33 +313,37 @@ async function main(): Promise<void> {
 
   // Handle Squire communication events
   squire.on('communication', async (event: any) => {
-    const data = event.data;
-    console.log(`[Communication] Event received:`, JSON.stringify(data));
+    try {
+      const data = event.data;
+      console.log(`[Communication] Event received:`, JSON.stringify(data));
 
-    // Find which workspace this came from
-    const workspaceId = data.workspaceId as string | undefined;
-    if (!workspaceId) {
-      console.warn('[Communication] No workspaceId, cannot send message');
-      return;
-    }
+      // Find which workspace this came from
+      const workspaceId = data.workspaceId as string | undefined;
+      if (!workspaceId) {
+        console.warn('[Communication] No workspaceId, cannot send message');
+        return;
+      }
 
-    console.log(`[Communication] Sending to workspace ${workspaceId.slice(0, 8)}...`);
+      console.log(`[Communication] Sending to workspace ${workspaceId.slice(0, 8)}...`);
 
-    if (data.type === 'text') {
-      await communicator.sendText(workspaceId, data.content as string);
-    } else if (data.type === 'embed') {
-      await communicator.sendEmbed(
-        workspaceId,
-        (data.title as string) || 'Update',
-        data.content as string,
-        (data.color as 'green' | 'red' | 'blue') || 'blue'
-      );
-    } else if (data.type === 'file' && data.filePath) {
-      await communicator.sendFile(
-        workspaceId,
-        data.filePath as string,
-        data.content as string | undefined
-      );
+      if (data.type === 'text') {
+        await communicator.sendText(workspaceId, data.content as string);
+      } else if (data.type === 'embed') {
+        await communicator.sendEmbed(
+          workspaceId,
+          (data.title as string) || 'Update',
+          data.content as string,
+          (data.color as 'green' | 'red' | 'blue') || 'blue'
+        );
+      } else if (data.type === 'file' && data.filePath) {
+        await communicator.sendFile(
+          workspaceId,
+          data.filePath as string,
+          data.content as string | undefined
+        );
+      }
+    } catch (error) {
+      console.error('[Communication] Handler error:', error);
     }
   });
 
@@ -392,7 +396,11 @@ async function main(): Promise<void> {
 
   // Handle SDK output events - stream messages to Discord
   squire.on('output', async (event: any) => {
-    await outputRouter.handleOutput(event.data);
+    try {
+      await outputRouter.handleOutput(event.data);
+    } catch (error) {
+      console.error('[Squire] Output handler error:', error);
+    }
   });
 
   // Handle tool_use events - break message stream when tool is used
@@ -411,45 +419,49 @@ async function main(): Promise<void> {
 
   // Handle scheduled task failures that need user action.
   squire.on('task_failed', async (event: any) => {
-    const data = event.data;
-    const task = data.task as { taskId: string; workspaceId: string; description: string; status: string; result?: { parsedSummary?: string; error?: string; suggestedFixes?: string[] } } | undefined;
-    if (!task?.workspaceId) {
-      return;
+    try {
+      const data = event.data;
+      const task = data.task as { taskId: string; workspaceId: string; description: string; status: string; result?: { parsedSummary?: string; error?: string; suggestedFixes?: string[] } } | undefined;
+      if (!task?.workspaceId) {
+        return;
+      }
+
+      const channel = communicator.getChannel(task.workspaceId);
+      if (!channel) {
+        console.warn(`[Squire] Task ${task.taskId} failed but no channel is mapped for workspace ${task.workspaceId}`);
+        return;
+      }
+
+      const summary = task.result?.parsedSummary || task.result?.error || 'Scheduled task failed.';
+      const fixes = (task.result?.suggestedFixes || [])
+        .slice(0, 4)
+        .map(f => `• ${f}`)
+        .join('\n');
+
+      const embed = new EmbedBuilder()
+        .setTitle('Scheduled Task Needs Attention')
+        .setDescription([
+          `**Task:** ${task.description}`,
+          `**Status:** ${task.status}`,
+          '',
+          summary,
+          fixes ? `\n**Suggested Actions**\n${fixes}` : '',
+        ].join('\n'))
+        .setColor(0xff8800)
+        .setFooter({ text: `Task ID: ${task.taskId}` })
+        .setTimestamp();
+
+      const actionRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder().setCustomId(`sched_retry_${task.taskId}`).setLabel('Retry now').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId(`sched_skip_${task.taskId}`).setLabel('Skip run').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId(`sched_disable_${task.taskId}`).setLabel('Disable task').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId(`sched_autofix_${task.taskId}`).setLabel('Auto-fix + retry').setStyle(ButtonStyle.Primary)
+      );
+
+      await channel.send({ embeds: [embed], components: [actionRow] });
+    } catch (error) {
+      console.error('[Squire] task_failed handler error:', error);
     }
-
-    const channel = communicator.getChannel(task.workspaceId);
-    if (!channel) {
-      console.warn(`[Squire] Task ${task.taskId} failed but no channel is mapped for workspace ${task.workspaceId}`);
-      return;
-    }
-
-    const summary = task.result?.parsedSummary || task.result?.error || 'Scheduled task failed.';
-    const fixes = (task.result?.suggestedFixes || [])
-      .slice(0, 4)
-      .map(f => `• ${f}`)
-      .join('\n');
-
-    const embed = new EmbedBuilder()
-      .setTitle('Scheduled Task Needs Attention')
-      .setDescription([
-        `**Task:** ${task.description}`,
-        `**Status:** ${task.status}`,
-        '',
-        summary,
-        fixes ? `\n**Suggested Actions**\n${fixes}` : '',
-      ].join('\n'))
-      .setColor(0xff8800)
-      .setFooter({ text: `Task ID: ${task.taskId}` })
-      .setTimestamp();
-
-    const actionRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder().setCustomId(`sched_retry_${task.taskId}`).setLabel('Retry now').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId(`sched_skip_${task.taskId}`).setLabel('Skip run').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(`sched_disable_${task.taskId}`).setLabel('Disable task').setStyle(ButtonStyle.Danger),
-      new ButtonBuilder().setCustomId(`sched_autofix_${task.taskId}`).setLabel('Auto-fix + retry').setStyle(ButtonStyle.Primary)
-    );
-
-    await channel.send({ embeds: [embed], components: [actionRow] });
   });
 
   // Handle approval requests

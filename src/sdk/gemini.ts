@@ -6,8 +6,11 @@
  * the actual client library API.
  */
 
+import fs from 'fs';
+import path from 'path';
 import { BaseSDKClient } from './base.js';
 import {
+  MCPServerConfig,
   SDKConfig,
   SDKMessage,
   SDKToolResult,
@@ -23,6 +26,9 @@ import {
 export class GeminiSDKClient extends BaseSDKClient {
   readonly provider = 'gemini';
   private client: any = null;
+  private supportsResume = true;
+  private outputFormat: 'stream-json' | 'json' = 'stream-json';
+  private allowedMcpServerNames: string[] = [];
 
   constructor(config: SDKConfig) {
     super(config);
@@ -32,18 +38,26 @@ export class GeminiSDKClient extends BaseSDKClient {
     try {
       const { GeminiClient } = await import('@raylin01/gemini-client');
       const approvalMode = this.getApprovalMode();
+      const runtime = this.prepareRuntimeEnvironment();
+      this.allowedMcpServerNames = runtime.allowedMcpServerNames;
 
       this.client = new GeminiClient({
         cwd: this.config.cwd || process.cwd(),
         geminiPath: this.config.cliPath,
-        env: {
-          ...process.env,
-          ...this.config.env,
-        },
+        env: runtime.env,
         model: this.config.model,
-        outputFormat: 'json',
+        outputFormat: this.outputFormat,
         approvalMode,
+        allowedMcpServerNames: this.allowedMcpServerNames,
       });
+
+      if (
+        this.supportsResume &&
+        this.config.resumeSessionId &&
+        typeof this.client.setSessionId === 'function'
+      ) {
+        this.client.setSessionId(this.config.resumeSessionId);
+      }
 
       this.setupEventListeners();
 
@@ -67,6 +81,45 @@ export class GeminiSDKClient extends BaseSDKClient {
       default:
         return 'default';
     }
+  }
+
+  private buildMergedMcpServers(): Record<string, MCPServerConfig> {
+    const merged = { ...(this.config.mcpServers || {}) } as Record<string, MCPServerConfig>;
+    if (this.config.toolBridge) {
+      merged[this.config.toolBridge.serverName] = {
+        command: this.config.toolBridge.command,
+        args: this.config.toolBridge.args,
+        env: this.config.toolBridge.env,
+      };
+    }
+    return merged;
+  }
+
+  private ensureRuntimeDir(): string {
+    const fallback = path.join(this.config.cwd || process.cwd(), '.squire', 'runtime', 'gemini');
+    const runtimeDir = this.config.runtimeDir || fallback;
+    fs.mkdirSync(runtimeDir, { recursive: true });
+    return runtimeDir;
+  }
+
+  private prepareRuntimeEnvironment(): { env: NodeJS.ProcessEnv; allowedMcpServerNames: string[] } {
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      ...this.config.env,
+    };
+
+    const mergedMcpServers = this.buildMergedMcpServers();
+    const allowedMcpServerNames = Object.keys(mergedMcpServers);
+    if (allowedMcpServerNames.length === 0) {
+      return { env, allowedMcpServerNames };
+    }
+
+    const runtimeDir = this.ensureRuntimeDir();
+    const settingsPath = path.join(runtimeDir, 'gemini-system-settings.json');
+    fs.writeFileSync(settingsPath, JSON.stringify({ mcpServers: mergedMcpServers }, null, 2), 'utf8');
+    env.GEMINI_CLI_SYSTEM_SETTINGS_PATH = settingsPath;
+
+    return { env, allowedMcpServerNames };
   }
 
   private setupEventListeners(): void {
@@ -121,31 +174,105 @@ export class GeminiSDKClient extends BaseSDKClient {
 
     this.setStatus('working');
 
-    try {
-      const result = await this.client.sendMessage(message.content);
+    let lastError: Error | null = null;
 
-      if (result.status === 'error') {
-        const errMsg = result.error?.message || result.stderr || 'Gemini CLI failed without an explicit error message.';
-        throw new Error(errMsg);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const runOptions: Record<string, unknown> = {
+          outputFormat: this.outputFormat,
+        };
+        if (this.allowedMcpServerNames.length > 0) {
+          runOptions.allowedMcpServerNames = this.allowedMcpServerNames;
+        }
+
+        const result = this.supportsResume
+          ? await this.client.sendMessage(message.content, runOptions)
+          : await this.client.startSession(message.content, runOptions);
+
+        if (result.status === 'error') {
+          const rawError = this.extractCliErrorText(result);
+
+          if (this.supportsResume && this.isResumeUnsupportedError(rawError)) {
+            this.supportsResume = false;
+            if (typeof this.client.setSessionId === 'function') {
+              this.client.setSessionId(null);
+            }
+            this.config.resumeSessionId = undefined;
+            continue;
+          }
+
+          if (
+            this.outputFormat === 'stream-json' &&
+            this.isStreamJsonUnsupportedError(rawError)
+          ) {
+            this.outputFormat = 'json';
+            continue;
+          }
+
+          throw new Error(rawError || 'Gemini CLI failed without an explicit error message.');
+        }
+
+        if (result.sessionId && result.sessionId !== this.config.resumeSessionId) {
+          this.config.resumeSessionId = result.sessionId;
+          this.emit('metadata', { sessionId: result.sessionId, model: this.config.model });
+        }
+
+        // In JSON mode we don't receive message_delta events, so emit final text directly.
+        if (this.outputFormat === 'json') {
+          const responseText = this.extractResponseText(result);
+          if (responseText) {
+            this.emitOutput(responseText, true, 'stdout');
+          }
+        } else {
+          this.outputThrottler.flush(true);
+        }
+
+        // Ensure we clean up state whenever the process finishes
+        this.setStatus('idle');
+        this.emit('complete');
+        return;
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error));
+
+        if (this.supportsResume && this.isResumeUnsupportedError(err.message)) {
+          this.supportsResume = false;
+          if (typeof this.client.setSessionId === 'function') {
+            this.client.setSessionId(null);
+          }
+          this.config.resumeSessionId = undefined;
+          lastError = err;
+          continue;
+        }
+
+        if (
+          this.outputFormat === 'stream-json' &&
+          this.isStreamJsonUnsupportedError(err.message)
+        ) {
+          this.outputFormat = 'json';
+          lastError = err;
+          continue;
+        }
+
+        this.emitError(err);
+        throw err;
       }
-
-      if (result.sessionId && result.sessionId !== this.config.resumeSessionId) {
-        this.config.resumeSessionId = result.sessionId;
-        this.emit('metadata', { sessionId: result.sessionId, model: this.config.model });
-      }
-
-      const responseText = this.extractResponseText(result);
-      if (responseText) {
-        this.emitOutput(responseText, true, 'stdout');
-      }
-
-      // Ensure we clean up state whenever the process finishes
-      this.setStatus('idle');
-      this.emit('complete');
-    } catch (error) {
-      this.emitError(error instanceof Error ? error : new Error(String(error)));
-      throw error;
     }
+
+    const finalError = lastError || new Error('Gemini sendMessage failed after retries.');
+    this.emitError(finalError);
+    throw finalError;
+  }
+
+  private extractCliErrorText(result: any): string {
+    return String(result?.error?.message || result?.stderr || '').trim();
+  }
+
+  private isResumeUnsupportedError(message: string): boolean {
+    return /unknown argument:\s*resume/i.test(message);
+  }
+
+  private isStreamJsonUnsupportedError(message: string): boolean {
+    return /output-format/i.test(message) && /stream-json/i.test(message);
   }
 
   private extractResponseText(result: any): string {

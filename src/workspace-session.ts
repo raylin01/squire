@@ -10,7 +10,7 @@
 import { EventEmitter } from 'events';
 import type { Workspace, SDKProvider } from './types.js';
 import { createSDKClient, BaseSDKClient } from './sdk/index.js';
-import type { SDKMessage, OutputEvent, ToolUseEvent, ApprovalEvent } from './sdk/types.js';
+import type { SDKMessage, OutputEvent, ToolUseEvent, ApprovalEvent, SDKTool, MCPServerConfig, NativeToolBridgeConfig } from './sdk/types.js';
 
 export interface WorkspaceSessionEvents {
   output: [OutputEvent & { workspaceId: string }];
@@ -35,6 +35,10 @@ export class WorkspaceSession extends EventEmitter<WorkspaceSessionEvents> {
   private permissionMode: 'strict' | 'autoSafe' | 'permissive';
   private model?: string;
   private cliPath?: string;
+  private mcpServers?: Record<string, MCPServerConfig>;
+  private tools?: SDKTool[];
+  private toolBridge?: NativeToolBridgeConfig;
+  private runtimeDir?: string;
   private running: boolean = false;
 
   constructor(
@@ -44,6 +48,10 @@ export class WorkspaceSession extends EventEmitter<WorkspaceSessionEvents> {
       permissionMode: 'strict' | 'autoSafe' | 'permissive';
       model?: string;
       cliPath?: string;
+      mcpServers?: Record<string, MCPServerConfig>;
+      tools?: SDKTool[];
+      toolBridge?: NativeToolBridgeConfig;
+      runtimeDir?: string;
     }
   ) {
     super();
@@ -52,6 +60,10 @@ export class WorkspaceSession extends EventEmitter<WorkspaceSessionEvents> {
     this.permissionMode = options.permissionMode;
     this.model = options.model;
     this.cliPath = options.cliPath;
+    this.mcpServers = options.mcpServers;
+    this.tools = options.tools;
+    this.toolBridge = options.toolBridge;
+    this.runtimeDir = options.runtimeDir;
   }
 
   get workspaceId(): string {
@@ -71,6 +83,18 @@ export class WorkspaceSession extends EventEmitter<WorkspaceSessionEvents> {
 
   updateWorkspace(updates: Partial<Workspace>): void {
     this.workspace = { ...this.workspace, ...updates };
+  }
+
+  setToolRuntime(options: {
+    tools: SDKTool[];
+    mcpServers?: Record<string, MCPServerConfig>;
+    toolBridge?: NativeToolBridgeConfig;
+    runtimeDir?: string;
+  }): void {
+    this.tools = options.tools;
+    this.mcpServers = options.mcpServers;
+    this.toolBridge = options.toolBridge;
+    this.runtimeDir = options.runtimeDir;
   }
 
   /**
@@ -103,6 +127,10 @@ export class WorkspaceSession extends EventEmitter<WorkspaceSessionEvents> {
       cwd,
       permissionMode: this.permissionMode,
       cliPath: this.cliPath,
+      mcpServers: this.mcpServers,
+      tools: this.tools,
+      toolBridge: this.toolBridge,
+      runtimeDir: this.runtimeDir,
       resumeSessionId, // Resume previous conversation if available
     });
 
