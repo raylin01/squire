@@ -431,6 +431,7 @@ export class Squire extends EventEmitter {
       mcpServers: runtime.mcpServers,
       toolBridge: runtime.toolBridge,
       runtimeDir: path.join(this.config.dataDir, 'runtime', workspace.workspaceId),
+      outputThrottleMs: this.config.sdk.outputThrottleMs,
     });
 
     // Set up event forwarding from session to Squire events

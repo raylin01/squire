@@ -244,6 +244,27 @@ async function main(): Promise<void> {
       };
     }
   }
+  if (process.env.SQUIRE_OUTPUT_THROTTLE_MS) {
+    const outputThrottleMs = parseInt(process.env.SQUIRE_OUTPUT_THROTTLE_MS, 10);
+    if (!Number.isNaN(outputThrottleMs) && outputThrottleMs >= 0) {
+      config = {
+        ...config,
+        squire: {
+          ...config.squire,
+          outputThrottleMs,
+        },
+      };
+    } else {
+      console.warn(`[SquireBot] Ignoring invalid SQUIRE_OUTPUT_THROTTLE_MS: ${process.env.SQUIRE_OUTPUT_THROTTLE_MS}`);
+    }
+  }
+
+  const configuredThrottleMs = config.squire?.outputThrottleMs;
+  const effectiveThrottleMs = Number.isFinite(configuredThrottleMs) && (configuredThrottleMs as number) >= 0
+    ? Math.floor(configuredThrottleMs as number)
+    : 1200;
+  process.env.SQUIRE_OUTPUT_THROTTLE_MS = String(effectiveThrottleMs);
+  console.log(`[SquireBot] Output throttle: ${effectiveThrottleMs}ms`);
 
   // Determine safe mode (CLI flag overrides config)
   const useSafeMode = safeMode || config.plugins?.safeMode || false;
@@ -277,6 +298,7 @@ async function main(): Promise<void> {
       model: config.squire?.model,
       cliPath: config.squire?.cliPath,
       resumeSessionId: config.resumeSessionId,
+      outputThrottleMs: effectiveThrottleMs,
     },
     permissions: {
       mode: (config.squire?.permissionMode || 'autoSafe') as 'strict' | 'autoSafe' | 'permissive',

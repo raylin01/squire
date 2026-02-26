@@ -25,6 +25,7 @@ export interface SquireBotConfig {
     permissionMode?: 'strict' | 'autoSafe' | 'permissive';
     daemonMode?: boolean;
     pollInterval?: number;
+    outputThrottleMs?: number;
   };
 
   // Squire identity
@@ -117,6 +118,7 @@ export function createDefaultConfig(
       permissionMode: 'autoSafe',
       daemonMode: true,
       pollInterval: 60000,
+      outputThrottleMs: 1200,
     },
     plugins: {
       safeMode: false,

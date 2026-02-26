@@ -39,6 +39,7 @@ export class WorkspaceSession extends EventEmitter<WorkspaceSessionEvents> {
   private tools?: SDKTool[];
   private toolBridge?: NativeToolBridgeConfig;
   private runtimeDir?: string;
+  private outputThrottleMs?: number;
   private running: boolean = false;
 
   constructor(
@@ -52,6 +53,7 @@ export class WorkspaceSession extends EventEmitter<WorkspaceSessionEvents> {
       tools?: SDKTool[];
       toolBridge?: NativeToolBridgeConfig;
       runtimeDir?: string;
+      outputThrottleMs?: number;
     }
   ) {
     super();
@@ -64,6 +66,7 @@ export class WorkspaceSession extends EventEmitter<WorkspaceSessionEvents> {
     this.tools = options.tools;
     this.toolBridge = options.toolBridge;
     this.runtimeDir = options.runtimeDir;
+    this.outputThrottleMs = options.outputThrottleMs;
   }
 
   get workspaceId(): string {
@@ -131,6 +134,7 @@ export class WorkspaceSession extends EventEmitter<WorkspaceSessionEvents> {
       tools: this.tools,
       toolBridge: this.toolBridge,
       runtimeDir: this.runtimeDir,
+      outputThrottleMs: this.outputThrottleMs,
       resumeSessionId, // Resume previous conversation if available
     });
 

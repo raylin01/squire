@@ -68,6 +68,9 @@ export interface SDKConfig {
 
   /** Debug mode */
   debug?: boolean;
+
+  /** Throttle interval for streaming output emission (ms) */
+  outputThrottleMs?: number;
 }
 
 // ============================================================================

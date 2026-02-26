@@ -232,10 +232,13 @@ export abstract class BaseSDKClient extends EventEmitter<SDKClientEventMap> {
         this.config = config;
 
         const envThrottle = Number(process.env.SQUIRE_OUTPUT_THROTTLE_MS || '');
+        const configThrottle = Number(this.config.outputThrottleMs ?? '');
         const throttleMs =
             Number.isFinite(envThrottle) && envThrottle >= 0
                 ? Math.floor(envThrottle)
-                : 500;
+                : Number.isFinite(configThrottle) && configThrottle >= 0
+                    ? Math.floor(configThrottle)
+                    : 500;
 
         this.outputThrottler = new OutputThrottler((output) => {
             this.emit("output", output);

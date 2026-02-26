@@ -106,6 +106,7 @@ export interface SDKConfig {
   model?: string;
   cliPath?: string;
   resumeSessionId?: string;
+  outputThrottleMs?: number;
   mcpServers?: Record<string, {
     command: string;
     args?: string[];
