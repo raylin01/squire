@@ -772,9 +772,6 @@ function setupMessageHandler(
       registerQuestionChannel(workspaceId, message.channel as TextChannel);
     }
 
-    // Clear streaming state for new user message (creates fresh message for response)
-    communicator.clearStreamingState(workspaceId);
-
     // Send to Squire
     try {
       await squire.sendMessage(workspaceId, content);

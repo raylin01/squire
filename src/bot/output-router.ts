@@ -21,6 +21,7 @@ export class DiscordOutputRouter {
   private lastStdoutSeen = new Map<string, string>();
   private streamPrefixToStrip = new Map<string, string>();
   private routeQueues = new Map<string, Promise<void>>();
+  private inThinkingSegment = new Map<string, boolean>();
 
   constructor(private communicator: OutputRouterCommunicator) {}
 
@@ -121,23 +122,31 @@ export class DiscordOutputRouter {
     const workspaceId = data.workspaceId;
     if (!workspaceId) return;
 
-    // Track type changes for stdout and in-progress thinking so the transition
-    // from thinking -> stdout starts a fresh message when requested.
-    const shouldTrackTypeChange = data.outputType === 'stdout' || !data.isComplete;
-    const typeChanged = shouldTrackTypeChange
-      ? this.communicator.checkOutputTypeChange(workspaceId, data.outputType)
-      : false;
-    if (typeChanged) {
-      this.streamPrefixToStrip.delete(workspaceId);
-    }
-
     if (data.outputType !== 'stdout') {
-      if (typeChanged || data.isComplete) {
-        this.debug(`non-stdout workspace=${workspaceId.slice(0, 8)} type=${data.outputType} complete=${data.isComplete}`);
+      if (data.outputType === 'thinking') {
+        const inThinking = this.inThinkingSegment.get(workspaceId) === true;
+        const hasStream = this.communicator.hasStreamingMessage(workspaceId);
+        if (hasStream && !inThinking) {
+          this.debug(`thinking boundary clear streaming workspace=${workspaceId.slice(0, 8)}`);
+          this.communicator.clearStreamingState(workspaceId);
+          this.streamPrefixToStrip.delete(workspaceId);
+        }
+        if (data.isComplete) {
+          this.inThinkingSegment.delete(workspaceId);
+        } else {
+          this.inThinkingSegment.set(workspaceId, true);
+        }
       }
       return;
     }
 
+    // Exiting thinking segment once stdout resumes.
+    this.inThinkingSegment.delete(workspaceId);
+
+    const typeChanged = this.communicator.checkOutputTypeChange(workspaceId, data.outputType);
+    if (typeChanged) {
+      this.streamPrefixToStrip.delete(workspaceId);
+    }
     this.debug(`stdout workspace=${workspaceId.slice(0, 8)} complete=${data.isComplete} len=${data.content.length} typeChanged=${typeChanged}`);
 
     const cleanContent = sanitizeAssistantStdout(data.content);
@@ -224,6 +233,7 @@ export class DiscordOutputRouter {
     if (data.isComplete) {
       this.lastStdoutSeen.delete(workspaceId);
       this.streamPrefixToStrip.delete(workspaceId);
+      this.inThinkingSegment.delete(workspaceId);
     }
   }
 
@@ -233,6 +243,7 @@ export class DiscordOutputRouter {
         this.debug(`tool_use clear streaming workspace=${workspaceId.slice(0, 8)}`);
         this.communicator.clearStreamingState(workspaceId);
         this.streamPrefixToStrip.delete(workspaceId);
+        this.inThinkingSegment.delete(workspaceId);
       });
     }
   }
@@ -241,6 +252,7 @@ export class DiscordOutputRouter {
     if (workspaceId) {
       void this.enqueueWorkspace(workspaceId, async () => {
         this.debug(`complete workspace=${workspaceId.slice(0, 8)} (defer stream clear)`);
+        this.inThinkingSegment.delete(workspaceId);
       });
     }
   }
@@ -251,6 +263,7 @@ export class DiscordOutputRouter {
         this.debug(`approval_required clear streaming workspace=${workspaceId.slice(0, 8)}`);
         this.communicator.clearStreamingState(workspaceId);
         this.streamPrefixToStrip.delete(workspaceId);
+        this.inThinkingSegment.delete(workspaceId);
       });
     }
   }
@@ -260,5 +273,6 @@ export class DiscordOutputRouter {
     this.debug(`reset workspace state workspace=${workspaceId.slice(0, 8)}`);
     this.lastStdoutSeen.delete(workspaceId);
     this.streamPrefixToStrip.delete(workspaceId);
+    this.inThinkingSegment.delete(workspaceId);
   }
 }

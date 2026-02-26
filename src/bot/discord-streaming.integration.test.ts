@@ -241,7 +241,7 @@ describe('Discord streaming integration', () => {
     expect(channel.sends).toEqual(['Message A', 'Message B', 'Message C']);
   });
 
-  it('avoids duplicated final message when post-thinking stdout is accumulated', async () => {
+  it('splits again when a second thinking segment appears before final accumulated stdout', async () => {
     const channel = new FakeChannel();
     const communicator = createCommunicator(channel);
     const router = new DiscordOutputRouter(communicator);
@@ -282,9 +282,12 @@ describe('Discord streaming integration', () => {
     });
 
     expect(channel.sends).toEqual(['Phase one', '+ phase two', '+ phase three']);
+    expect(channel.messages[1]?.content).toBe('+ phase two');
+    expect(channel.messages[2]?.content).toBe('+ phase three');
+    expect(communicator.hasStreamingMessage('ws-1')).toBe(false);
   });
 
-  it('keeps streaming message open across terminal thinking and complete-before-final-stdout ordering', async () => {
+  it('splits on terminal thinking before final stdout even when complete arrives first', async () => {
     const channel = new FakeChannel();
     const communicator = createCommunicator(channel);
     const router = new DiscordOutputRouter(communicator);
@@ -329,8 +332,9 @@ describe('Discord streaming integration', () => {
       isComplete: true,
     });
 
-    expect(channel.sends).toEqual(['Alpha', 'Beta']);
-    expect(channel.messages[1]?.content).toBe('Beta Gamma');
+    expect(channel.sends).toEqual(['Alpha', 'Beta', 'Gamma']);
+    expect(channel.messages[1]?.content).toBe('Beta');
+    expect(channel.messages[2]?.content).toBe('Gamma');
   });
 
   it('uses prefix-overlap continuation when accumulated stdout slightly rewrites earlier text', async () => {
@@ -425,7 +429,7 @@ describe('Discord streaming integration', () => {
     ]);
   });
 
-  it('keeps prefix-stripped continuation stable across later stdout updates and final completion', async () => {
+  it('keeps prefix-stripped continuation stable across later stdout updates with extra split after terminal thinking', async () => {
     const channel = new FakeChannel();
     const communicator = createCommunicator(channel);
     const router = new DiscordOutputRouter(communicator);
@@ -476,12 +480,14 @@ describe('Discord streaming integration', () => {
       isComplete: true,
     });
 
-    expect(channel.sends.length).toBe(2);
+    expect(channel.sends.length).toBe(3);
     expect(channel.sends[0]).toBe('**Message 2:** Start of message 2.');
-    const finalSecond = channel.messages[1]?.content || '';
-    expect(finalSecond).toContain('**Message 3:**');
-    expect(finalSecond).toContain('and final tail');
-    expect((finalSecond.match(/\*\*Message 2:\*\*/g) || []).length).toBeLessThanOrEqual(1);
+    const streamedSecond = channel.messages[1]?.content || '';
+    expect(streamedSecond).toContain('**Message 3:**');
+    expect(streamedSecond).toContain('with extension');
+    expect((streamedSecond.match(/\*\*Message 2:\*\*/g) || []).length).toBeLessThanOrEqual(1);
+    const finalThird = channel.messages[2]?.content || '';
+    expect(finalThird).toContain('and final tail');
   });
 
   it('backs up continuation start to avoid mid-word splits across logical boundaries', async () => {

@@ -21,7 +21,6 @@ interface WorkspaceManager {
 
 interface DiscordCommunicator {
   registerChannel(workspaceId: string, channel: any): void;
-  clearStreamingState(workspaceId: string): void;
 }
 
 /**
@@ -79,9 +78,6 @@ export function setupDmHandler(
     if (!message.channel.partial) {
       registerQuestionChannel(workspaceId, message.channel);
     }
-
-    // Ensure each user turn starts with a fresh streamed response message
-    communicator.clearStreamingState(workspaceId);
 
     // Regular commands (e.g. !approve)
     const commandHandled = await handleCommand(message, squire, workspaceId);
