@@ -1080,7 +1080,13 @@ export class Squire extends EventEmitter {
 
     if (!permissionReason) {
       // Auto-approve
-      await session.sendApproval(event.requestId, 'allow');
+      await session.sendApproval(event.requestId, 'allow', event.toolInput);
+      this.emitEvent('approval_auto', {
+        requestId: event.requestId,
+        toolName: event.toolName,
+        toolInput: event.toolInput,
+        workspaceId: event.workspaceId || this.activeWorkspaceId,
+      });
       return;
     }
 
@@ -1122,6 +1128,10 @@ export class Squire extends EventEmitter {
       return checkBashPermission(command, mode);
     }
 
+    if (toolName === 'AskUserQuestion') {
+      return 'AskUserQuestion requires user input';
+    }
+
     // Check general tool permissions
     return checkToolPermission(toolName, input, mode);
   }
@@ -1144,10 +1154,15 @@ export class Squire extends EventEmitter {
       return;
     }
 
+    let resolvedUpdatedInput = updatedInput;
+
     // If approved, record the pattern for future auto-approval
     if (approved) {
       const pendingInfo = this.pendingApprovals.get(requestId);
       if (pendingInfo) {
+        if (!resolvedUpdatedInput) {
+          resolvedUpdatedInput = pendingInfo.toolInput;
+        }
         // Record learned pattern for Bash commands
         if ((pendingInfo.toolName === 'Bash' || pendingInfo.toolName === 'bash') && pendingInfo.toolInput.command) {
           const command = pendingInfo.toolInput.command as string;
@@ -1160,7 +1175,7 @@ export class Squire extends EventEmitter {
       this.pendingApprovals.delete(requestId);
     }
 
-    await session.sendApproval(requestId, approved ? 'allow' : 'deny', updatedInput);
+    await session.sendApproval(requestId, approved ? 'allow' : 'deny', resolvedUpdatedInput);
     this.updateActivity('working');
   }
 

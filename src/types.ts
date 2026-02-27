@@ -481,6 +481,7 @@ export type SquireEventType =
   | 'channel_operation'
   | 'communication'
   | 'approval_required'
+  | 'approval_auto'
   | 'status';
 
 export interface SquireEvent {

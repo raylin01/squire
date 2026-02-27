@@ -544,6 +544,34 @@ async function main(): Promise<void> {
     }
   });
 
+  // Surface auto-approvals to users for transparency.
+  squire.on('approval_auto', async (event: any) => {
+    const data = event.data;
+    const workspaceId = data.workspaceId as string | undefined;
+    if (!workspaceId) return;
+
+    const channel = communicator.getChannel(workspaceId);
+    if (!channel) return;
+
+    let description = `**Tool:** ${data.toolName}`;
+    if (data.toolName === 'bash' || data.toolName === 'Bash') {
+      const command = data.toolInput?.command as string;
+      if (command) {
+        description += `\n**Command:** \`${command.slice(0, 100)}${command.length > 100 ? '...' : ''}\``;
+      }
+    }
+
+    try {
+      const embed = new EmbedBuilder()
+        .setTitle('Tool Auto-Approved')
+        .setDescription(description)
+        .setColor(0x2ECC71);
+      await channel.send({ embeds: [embed] });
+    } catch (error) {
+      console.error('[Squire] Failed to send auto-approval message:', error);
+    }
+  });
+
   // Create plugin loader
   const pluginsDir = config.plugins?.pluginsDir || path.join(getSquireBotDir(), 'plugins');
   const pluginLoader = createPluginLoader({

@@ -359,8 +359,9 @@ export class ClaudeSDKClient extends BaseSDKClient {
     }
 
     try {
+      const effectiveUpdatedInput = updatedInput ?? pending.input ?? {};
       const responseData = decision === 'allow'
-        ? { behavior: 'allow' as const, updatedInput, message: 'Approved' }
+        ? { behavior: 'allow' as const, updatedInput: effectiveUpdatedInput, message: 'Approved' }
         : { behavior: 'deny' as const, message: 'Denied by user' };
 
       await this.sendControlResponse(requestId, responseData);
