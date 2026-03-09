@@ -40,22 +40,46 @@ export class OutputThrottler {
     }
 
     addStdout(content: string): void {
+        const shouldFlushImmediately =
+            !this.timer && !this.pendingStdout && !this.lastEmittedStdout && !!content;
         this.pendingStdout = content;
+        if (shouldFlushImmediately) {
+            this.flush(false);
+            return;
+        }
         this.schedule();
     }
 
     addThinking(content: string): void {
+        const shouldFlushImmediately =
+            !this.timer && !this.pendingThinking && !this.lastEmittedThinking && !!content;
         this.pendingThinking = content;
+        if (shouldFlushImmediately) {
+            this.flush(false);
+            return;
+        }
         this.schedule();
     }
 
     appendStdout(content: string): void {
+        const shouldFlushImmediately =
+            !this.timer && !this.pendingStdout && !this.lastEmittedStdout && !!content;
         this.pendingStdout += content;
+        if (shouldFlushImmediately) {
+            this.flush(false);
+            return;
+        }
         this.schedule();
     }
 
     appendThinking(content: string): void {
+        const shouldFlushImmediately =
+            !this.timer && !this.pendingThinking && !this.lastEmittedThinking && !!content;
         this.pendingThinking += content;
+        if (shouldFlushImmediately) {
+            this.flush(false);
+            return;
+        }
         this.schedule();
     }
 
@@ -95,6 +119,18 @@ export class OutputThrottler {
             this.lastEmittedStdout = "";
             this.lastEmittedThinking = "";
         }
+    }
+
+    reset(): void {
+        if (this.timer) {
+            clearTimeout(this.timer);
+            this.timer = null;
+        }
+
+        this.pendingStdout = "";
+        this.pendingThinking = "";
+        this.lastEmittedStdout = "";
+        this.lastEmittedThinking = "";
     }
 
     private schedule(): void {
@@ -363,5 +399,9 @@ export abstract class BaseSDKClient extends EventEmitter<SDKClientEventMap> {
     protected emitError(error: Error): void {
         this.emit("error", error);
         this.setStatus("error");
+    }
+
+    protected resetOutputState(): void {
+        this.outputThrottler.reset();
     }
 }

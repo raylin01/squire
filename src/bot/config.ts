@@ -118,7 +118,7 @@ export function createDefaultConfig(
       permissionMode: 'autoSafe',
       daemonMode: true,
       pollInterval: 60000,
-      outputThrottleMs: 1200,
+      outputThrottleMs: 500,
     },
     plugins: {
       safeMode: false,

@@ -262,7 +262,7 @@ async function main(): Promise<void> {
   const configuredThrottleMs = config.squire?.outputThrottleMs;
   const effectiveThrottleMs = Number.isFinite(configuredThrottleMs) && (configuredThrottleMs as number) >= 0
     ? Math.floor(configuredThrottleMs as number)
-    : 1200;
+    : 500;
   process.env.SQUIRE_OUTPUT_THROTTLE_MS = String(effectiveThrottleMs);
   console.log(`[SquireBot] Output throttle: ${effectiveThrottleMs}ms`);
 

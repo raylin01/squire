@@ -26,7 +26,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "@raylin01/claude-client": "^0.1.0",
+    "@raylin01/claude-client": "^0.3.0",
     "@raylin01/codex-client": "^0.1.0",
     "@raylin01/gemini-client": "^0.1.0",
     "better-sqlite3": "^11.0.0",
