@@ -64,7 +64,7 @@ defineTool(
 // squire_switch_sdk - Switch SDK provider
 defineTool(
   'squire_switch_sdk',
-  'Switch the AI SDK provider. Options: claude, gemini, codex. The switch takes effect for new conversations.',
+  'Switch the AI SDK provider. Options: claude, gemini, codex. Squire writes a handoff summary, closes the old client, and rebuilds workspace sessions immediately.',
   {
     provider: {
       type: 'string',
@@ -99,7 +99,7 @@ defineTool(
 // squire_switch_model - Switch AI model
 defineTool(
   'squire_switch_model',
-  'Switch the AI model (e.g., claude-3-5-sonnet-20241022, gemini-exp-1206). The switch despawns active sessions so it takes effect immediately.',
+  'Switch the AI model. Squire writes a handoff summary, closes the old client, and rebuilds workspace sessions immediately.',
   {
     model: {
       type: 'string',

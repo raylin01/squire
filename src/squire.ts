@@ -55,6 +55,15 @@ interface ToolBridgeRequestBody {
   workspaceId?: string;
 }
 
+interface WorkspaceSwitchDetails {
+  reason: 'provider' | 'model';
+  switchedAt: string;
+  fromProvider: SDKProvider;
+  toProvider: SDKProvider;
+  fromModel: string | null;
+  toModel: string | null;
+}
+
 /**
  * Squire - The main personal AI assistant class
  */
@@ -507,38 +516,186 @@ export class Squire extends EventEmitter {
     return session;
   }
 
+  private getConfiguredModel(): string | undefined {
+    return this.config.sdk.model || this.config.model;
+  }
+
+  private getWorkspaceSwitchSummaryPath(workspace: Workspace): string {
+    const baseDir = workspace.context?.sandboxPath || path.join(this.config.dataDir, 'workspace-handoffs', workspace.workspaceId);
+    const summaryDir = path.join(baseDir, '.squire');
+    fs.mkdirSync(summaryDir, { recursive: true });
+    return path.join(summaryDir, 'switch-handoff.md');
+  }
+
+  private buildWorkspaceSwitchSummary(workspace: Workspace, details: WorkspaceSwitchDetails): string {
+    const projectPath = workspace.context?.projectPath || workspace.context?.sandboxPath || 'unknown';
+    const recentFiles = workspace.context?.recentFiles?.length
+      ? workspace.context.recentFiles.map((file) => `- ${file}`).join('\n')
+      : '- none recorded';
+    const currentTask = workspace.context?.currentTask || 'No current task recorded.';
+    const previousSessionId = workspace.context?.cliSessionId || 'none';
+
+    return [
+      '# Squire SDK Switch Handoff',
+      '',
+      `Generated: ${details.switchedAt}`,
+      `Reason: ${details.reason}`,
+      '',
+      '## Workspace',
+      '',
+      `- Name: ${workspace.name}`,
+      `- Workspace ID: ${workspace.workspaceId}`,
+      `- Source: ${workspace.source}`,
+      `- Source ID: ${workspace.sourceId}`,
+      `- Project Path: ${projectPath}`,
+      '',
+      '## Switch',
+      '',
+      `- Previous Provider: ${details.fromProvider}`,
+      `- Next Provider: ${details.toProvider}`,
+      `- Previous Model: ${details.fromModel || 'provider default'}`,
+      `- Next Model: ${details.toModel || 'provider default'}`,
+      `- Previous Session ID: ${previousSessionId}`,
+      '',
+      '## Continuity Notes',
+      '',
+      `- Current task: ${currentTask}`,
+      '- Previous CLI session was closed before the switch and is not resumed automatically.',
+      '- Use this handoff summary to continue the conversation with the new provider or model.',
+      '',
+      '## Recent Files',
+      '',
+      recentFiles,
+      '',
+    ].join('\n');
+  }
+
+  private prepareWorkspaceForSwitch(workspace: Workspace, details: WorkspaceSwitchDetails): void {
+    const summaryPath = this.getWorkspaceSwitchSummaryPath(workspace);
+    const summary = this.buildWorkspaceSwitchSummary(workspace, details);
+    fs.writeFileSync(summaryPath, summary, 'utf8');
+
+    workspace.context = {
+      ...workspace.context,
+      cliSessionId: undefined,
+      sdkProvider: details.toProvider,
+      sdkModel: details.toModel || undefined,
+      pendingSwitchSummaryPath: summaryPath,
+      lastSwitchSummaryPath: summaryPath,
+      lastSwitchAt: details.switchedAt,
+    };
+  }
+
+  private buildSwitchPrompt(workspace: Workspace): string | null {
+    const summaryPath = workspace.context?.pendingSwitchSummaryPath;
+    if (!summaryPath || !fs.existsSync(summaryPath)) {
+      return null;
+    }
+
+    const summary = fs.readFileSync(summaryPath, 'utf8').trim();
+    if (!summary) {
+      return null;
+    }
+
+    return [
+      '[SDK switch handoff]',
+      'A previous session was closed because Squire switched provider or model.',
+      `Handoff summary file: ${summaryPath}`,
+      '',
+      summary,
+    ].join('\n');
+  }
+
+  private async clearPendingSwitchPrompt(workspace: Workspace): Promise<void> {
+    if (!workspace.context?.pendingSwitchSummaryPath) {
+      return;
+    }
+
+    workspace.context = {
+      ...workspace.context,
+      pendingSwitchSummaryPath: undefined,
+    };
+
+    await this.saveWorkspaces();
+  }
+
+  private async rebuildWorkspaceSessions(details: WorkspaceSwitchDetails): Promise<void> {
+    const sessionsToRestart = new Set<string>();
+    for (const [workspaceId, session] of this.workspaceSessions) {
+      if (session.isRunning()) {
+        sessionsToRestart.add(workspaceId);
+      }
+    }
+    if (this.activeWorkspaceId) {
+      sessionsToRestart.add(this.activeWorkspaceId);
+    }
+
+    for (const workspace of this.workspaces.values()) {
+      this.prepareWorkspaceForSwitch(workspace, details);
+    }
+    await this.saveWorkspaces();
+
+    for (const session of this.workspaceSessions.values()) {
+      await session.stop();
+    }
+    this.workspaceSessions.clear();
+
+    for (const workspace of this.workspaces.values()) {
+      this.createWorkspaceSession(workspace);
+    }
+
+    for (const workspaceId of sessionsToRestart) {
+      const session = this.workspaceSessions.get(workspaceId);
+      if (session) {
+        await session.start();
+      }
+    }
+  }
+
   /**
-   * Switch to a different SDK provider (despawns active sessions)
+   * Switch to a different SDK provider and rebuild workspace sessions.
    */
   async switchSDK(provider: SDKProvider): Promise<void> {
     if (this.config.sdk.provider === provider) {
       return;
     }
+
+    const details: WorkspaceSwitchDetails = {
+      reason: 'provider',
+      switchedAt: new Date().toISOString(),
+      fromProvider: this.config.sdk.provider,
+      toProvider: provider,
+      fromModel: this.getConfiguredModel() || null,
+      toModel: this.getConfiguredModel() || null,
+    };
+
     this.config.sdk.provider = provider;
-    console.log(`[Squire] SDK provider changed to ${provider}, despawning active sessions...`);
-    
-    // Despawn active sessions
-    for (const [workspaceId, session] of this.workspaceSessions) {
-      await session.stop();
-    }
-    this.workspaceSessions.clear();
+    details.toModel = this.getConfiguredModel() || null;
+
+    console.log(`[Squire] SDK provider changed to ${provider}, rebuilding workspace sessions...`);
+    await this.rebuildWorkspaceSessions(details);
   }
 
   /**
-   * Switch to a different model (despawns active sessions)
+   * Switch to a different model and rebuild workspace sessions.
    */
   async switchModel(model: string): Promise<void> {
     if (this.config.sdk.model === model || (!this.config.sdk.model && this.config.model === model)) {
       return;
     }
-    this.config.sdk.model = model;
-    console.log(`[Squire] Model changed to ${model}, despawning active sessions...`);
 
-    // Despawn active sessions
-    for (const [workspaceId, session] of this.workspaceSessions) {
-      await session.stop();
-    }
-    this.workspaceSessions.clear();
+    const details: WorkspaceSwitchDetails = {
+      reason: 'model',
+      switchedAt: new Date().toISOString(),
+      fromProvider: this.config.sdk.provider,
+      toProvider: this.config.sdk.provider,
+      fromModel: this.getConfiguredModel() || null,
+      toModel: model,
+    };
+
+    this.config.sdk.model = model;
+    console.log(`[Squire] Model changed to ${model}, rebuilding workspace sessions...`);
+    await this.rebuildWorkspaceSessions(details);
   }
 
   /**
@@ -617,7 +774,11 @@ export class Squire extends EventEmitter {
       createdAt: now,
       lastActivityAt: now,
       status: 'active',
-      context: options.context || {},
+      context: {
+        ...(options.context || {}),
+        sdkProvider: this.config.sdk.provider,
+        sdkModel: this.getConfiguredModel(),
+      },
     };
 
     this.workspaces.set(workspace.workspaceId, workspace);
@@ -888,6 +1049,11 @@ export class Squire extends EventEmitter {
     // Build message with compact context
     let contextContent = content;
 
+    const switchPrompt = this.buildSwitchPrompt(workspace);
+    if (switchPrompt) {
+      contextContent = `${switchPrompt}\n\n[New user message]\n${contextContent}`;
+    }
+
     // Add working directory context if workspace has a project path
     if (workspace.context?.projectPath) {
       contextContent = `[Working directory: ${workspace.context.projectPath}]\n\n${contextContent}`;
@@ -925,6 +1091,10 @@ export class Squire extends EventEmitter {
 
     // Send to workspace's SDK session
     await session.sendMessage({ role: 'user', content: contextContent });
+
+    if (switchPrompt) {
+      await this.clearPendingSwitchPrompt(workspace);
+    }
 
     // Return message (actual response comes via events)
     const message: SquireMessage = {
@@ -965,6 +1135,11 @@ export class Squire extends EventEmitter {
     // Build message with compact context
     let contextContent = content;
 
+    const switchPrompt = this.buildSwitchPrompt(workspace);
+    if (switchPrompt) {
+      contextContent = `${switchPrompt}\n\n[New user message]\n${contextContent}`;
+    }
+
     // Add working directory context if workspace has a project path
     if (workspace.context?.projectPath) {
       contextContent = `[Working directory: ${workspace.context.projectPath}]\n\n${contextContent}`;
@@ -980,6 +1155,10 @@ export class Squire extends EventEmitter {
 
     // Send to workspace's SDK session with images
     await session.sendMessageWithImages(contextContent, images);
+
+    if (switchPrompt) {
+      await this.clearPendingSwitchPrompt(workspace);
+    }
 
     // Return message (actual response comes via events)
     const message: SquireMessage = {
@@ -1579,6 +1758,12 @@ export class Squire extends EventEmitter {
         source: workspace.source,
         sourceId: workspace.sourceId,
         timezone: workspace.context?.timezone || null,
+        sdkProvider: workspace.context?.sdkProvider || this.config.sdk.provider,
+        sdkModel: workspace.context?.sdkModel || this.getConfiguredModel() || null,
+        cliSessionId: workspace.context?.cliSessionId || null,
+        lastSwitchAt: workspace.context?.lastSwitchAt || null,
+        lastSwitchSummaryPath: workspace.context?.lastSwitchSummaryPath || null,
+        pendingSwitchSummaryPath: workspace.context?.pendingSwitchSummaryPath || null,
         updatedAt: new Date().toISOString(),
       };
       fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));

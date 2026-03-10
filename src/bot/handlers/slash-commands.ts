@@ -371,7 +371,7 @@ async function handleConfig(
 
       try {
         await squire.switchSDK(provider);
-        await interaction.editReply(`Switched to ${provider} provider.`);
+        await interaction.editReply(`Switched to ${provider} provider and rebuilt active workspace sessions.`);
       } catch (error) {
         await interaction.editReply(`Failed to switch provider: ${error}`);
       }

@@ -1,67 +1,64 @@
 /**
  * Codex SDK Client Wrapper
  *
- * Wrapper around @raylin01/codex-client for use in Squire.
+ * Uses the structured @raylin01/codex-client API so Squire can consume a
+ * normalized turn stream and respond to approval/question requests cleanly.
  */
 
-import { BaseSDKClient } from './base.js';
-import type { MCPServerConfig, SDKConfig, SDKMessage, SDKToolResult, ToolUseEvent } from './types.js';
-import { appendFileSync, mkdirSync } from 'fs';
-import { dirname } from 'path';
+import { BaseSDKClient, PendingApprovalEntry, PendingApprovalTracker } from './base.js';
+import type { MCPServerConfig, SDKConfig, SDKMessage, SDKToolResult, ApprovalEvent, ToolUseEvent } from './types.js';
 
-type TurnPromise = {
-  resolve: () => void;
-  reject: (error: Error) => void;
-  timer: NodeJS.Timeout;
-};
+type OutputSegment = 'stdout' | 'thinking' | null;
 
-type PendingApproval = {
-  rpcRequestId: string | number;
-  kind: 'command' | 'file';
-};
+interface PendingCodexRequest extends PendingApprovalEntry {
+  requestKind: 'tool_approval' | 'question';
+}
 
 /**
  * Codex SDK Client
- *
- * Provides a unified interface for the Codex CLI app-server.
  */
 export class CodexSDKClient extends BaseSDKClient {
   readonly provider = 'codex';
-  private rawJsonlFile = process.env.SQUIRE_DEBUG_RAW_JSONL_FILE || process.env.SQUIRE_DEBUG_RAW_JSONL_PATH || '';
-  private rawJsonlEnabled = process.env.SQUIRE_DEBUG_RAW_JSONL === '1' || this.rawJsonlFile.length > 0;
-  private rawJsonlStdout = process.env.SQUIRE_DEBUG_RAW_JSONL_STDOUT === '1';
   private client: any = null;
-  private threadId: string | null = null;
-  private activeTurnId: string | null = null;
-  private pendingTurns = new Map<string, TurnPromise>();
-  private pendingApprovals = new Map<string, PendingApproval>();
+  private activeOutputSegment: OutputSegment = null;
 
   constructor(config: SDKConfig) {
     super(config);
+    this.approvalTracker = new PendingApprovalTracker<PendingCodexRequest>() as PendingApprovalTracker;
   }
 
   async start(): Promise<void> {
-    if (this.client && this.threadId) {
+    if (this.client) {
       return;
     }
 
     try {
       const { CodexClient } = await import('@raylin01/codex-client');
-      const args = this.buildCodexConfigArgs();
 
-      this.client = new CodexClient({
+      this.client = await CodexClient.init({
         cwd: this.config.cwd || process.cwd(),
         codexPath: this.config.cliPath,
         env: {
           ...process.env,
           ...this.config.env,
         },
-        args,
+        args: this.buildCodexConfigArgs(),
+        resumeThreadId: this.config.resumeSessionId,
+        model: this.config.model || null,
+        approvalPolicy: this.getApprovalPolicy(),
+        experimentalRawEvents: false,
       });
 
-      this.setupEventListeners();
-      await this.client.start();
-      await this.initializeThread();
+      const sessionId = this.client?.providerThreadId || this.config.resumeSessionId;
+      if (sessionId) {
+        this.config.resumeSessionId = sessionId;
+      }
+
+      this.emit('metadata', {
+        sessionId,
+        model: this.config.model,
+        permissionMode: this.getApprovalPolicy(),
+      });
 
       this.setStatus('idle');
     } catch (error) {
@@ -72,41 +69,6 @@ export class CodexSDKClient extends BaseSDKClient {
 
   private getApprovalPolicy(): 'never' | 'on-request' {
     return this.config.permissionMode === 'permissive' ? 'never' : 'on-request';
-  }
-
-  private safeStringify(value: unknown): string {
-    try {
-      return JSON.stringify(value, (_key, current) =>
-        typeof current === 'bigint' ? current.toString() : current
-      );
-    } catch {
-      return JSON.stringify({ note: 'unserializable payload' });
-    }
-  }
-
-  private logRawJsonl(kind: string, payload: unknown): void {
-    if (!this.rawJsonlEnabled) return;
-
-    const line = this.safeStringify({
-      ts: new Date().toISOString(),
-      provider: this.provider,
-      threadId: this.threadId,
-      kind,
-      payload,
-    });
-
-    if (this.rawJsonlStdout) {
-      console.log(`[StreamDebug][RawJSONL] ${line}`);
-    }
-
-    if (!this.rawJsonlFile) return;
-    try {
-      mkdirSync(dirname(this.rawJsonlFile), { recursive: true });
-      appendFileSync(this.rawJsonlFile, `${line}\n`, 'utf8');
-    } catch (error) {
-      console.warn('[CodexSDK] Failed to append raw JSONL debug log:', error);
-      this.rawJsonlFile = '';
-    }
   }
 
   private toTomlString(value: string): string {
@@ -170,362 +132,303 @@ export class CodexSDKClient extends BaseSDKClient {
     return args;
   }
 
-  private async initializeThread(): Promise<void> {
-    if (!this.client || this.threadId) {
-      return;
-    }
-
-    const baseParams = {
-      model: this.config.model || null,
-      modelProvider: null,
-      cwd: this.config.cwd || process.cwd(),
-      approvalPolicy: this.getApprovalPolicy(),
-      sandbox: null,
-      config: null,
-      baseInstructions: null,
-      developerInstructions: null,
-      personality: null,
-    };
-
-    const response = this.config.resumeSessionId
-      ? await this.client.resumeThread({
-          threadId: this.config.resumeSessionId,
-          ...baseParams,
-        })
-      : await this.client.startThread({
-          ...baseParams,
-          ephemeral: false,
-          experimentalRawEvents: false,
-        });
-
-    this.threadId = response?.thread?.id || null;
-    if (!this.threadId) {
-      throw new Error('Codex thread initialization failed: missing thread ID.');
-    }
-
-    this.emit('metadata', {
-      sessionId: this.threadId,
-      model: response?.model || this.config.model,
-      permissionMode: this.getApprovalPolicy(),
-    });
-  }
-
-  private setupEventListeners(): void {
-    if (!this.client) return;
-
-    this.client.on('notification', (notification: any) => {
-      this.logRawJsonl('notification', notification);
-      this.handleNotification(notification);
-    });
-
-    this.client.on('request', (request: any) => {
-      this.logRawJsonl('request', request);
-      this.handleRequest(request);
-    });
-
-    this.client.on('error', (error: Error) => {
-      this.rejectAllPendingTurns(error);
-      this.emitError(error);
-    });
-  }
-
-  private handleNotification(notification: any): void {
-    const params = (notification?.params || {}) as Record<string, any>;
-    const threadId = params.threadId || params.thread?.id;
-    if (threadId && this.threadId && threadId !== this.threadId) {
-      return;
-    }
-
-    switch (notification?.method) {
-      case 'item/agentMessage/delta':
-        this.appendOutput(String(params.delta || ''), false);
-        break;
-      case 'item/commandExecution/outputDelta':
-        this.appendOutput(String(params.delta || ''), false);
-        break;
-      case 'item/reasoning/textDelta':
-      case 'item/reasoning/summaryTextDelta':
-        this.appendThinkingDelta(String(params.delta || ''), false);
-        break;
-      case 'item/started': {
-        const item = params.item || {};
-        const type = String(item.type || '');
-        if (type === 'mcpToolCall' || type === 'commandExecution' || type === 'fileChange') {
-          this.outputThrottler.flush(false);
-          this.emit('tool_use', {
-            toolName: String(item.tool || item.name || type || 'tool'),
-            toolId: String(item.id || `${params.turnId || 'turn'}:${type}`),
-            input: (item.arguments && typeof item.arguments === 'object') ? item.arguments : {},
-          } as ToolUseEvent);
-        }
-        break;
-      }
-      case 'item/completed': {
-        const item = params.item || {};
-        if (item.type === 'agentMessage' && typeof item.text === 'string') {
-          this.emitOutput(item.text, false, 'stdout');
-        }
-        break;
-      }
-      case 'turn/started':
-        this.activeTurnId = String(params.turn?.id || this.activeTurnId || '');
-        this.setStatus('working');
-        break;
-      case 'turn/completed': {
-        const turnId = String(params.turn?.id || params.turnId || this.activeTurnId || '');
-        this.activeTurnId = null;
-        this.outputThrottler.flush(true);
-        this.resolvePendingTurn(turnId);
-        this.setStatus('idle');
-        this.emit('complete');
-        break;
-      }
-      case 'error': {
-        const willRetry = Boolean(params.willRetry);
-        if (!willRetry) {
-          const message = String(params.error?.message || 'Codex reported an error.');
-          const error = new Error(message);
-          this.rejectPendingTurn(String(params.turnId || this.activeTurnId || ''), error);
-          this.emitError(error);
-        }
-        break;
-      }
-      default:
-        break;
-    }
-  }
-
-  private handleRequest(request: any): void {
-    const params = (request?.params || {}) as Record<string, any>;
-    const threadId = params.threadId || params.conversationId;
-    if (threadId && this.threadId && threadId !== this.threadId) {
-      return;
-    }
-
-    switch (request?.method) {
-      case 'item/commandExecution/requestApproval': {
-        const approvalId = `codex-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const toolInput = {
-          command: params.command,
-          cwd: params.cwd,
-          reason: params.reason,
-        } as Record<string, unknown>;
-        this.pendingApprovals.set(approvalId, {
-          rpcRequestId: request.id,
-          kind: 'command',
-        });
-        this.approvalTracker.add(approvalId, {
-          requestId: approvalId,
-          toolName: 'bash',
-          input: toolInput,
-          createdAt: Date.now(),
-        });
-        this.emit('approval', {
-          requestId: approvalId,
-          toolName: 'bash',
-          toolInput,
-          context: typeof params.reason === 'string' ? params.reason : undefined,
-        });
-        this.setStatus('waiting');
-        break;
-      }
-      case 'item/fileChange/requestApproval': {
-        const approvalId = `codex-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const toolInput = {
-          reason: params.reason,
-          grantRoot: params.grantRoot,
-        } as Record<string, unknown>;
-        this.pendingApprovals.set(approvalId, {
-          rpcRequestId: request.id,
-          kind: 'file',
-        });
-        this.approvalTracker.add(approvalId, {
-          requestId: approvalId,
-          toolName: 'file_change',
-          input: toolInput,
-          createdAt: Date.now(),
-        });
-        this.emit('approval', {
-          requestId: approvalId,
-          toolName: 'file_change',
-          toolInput,
-          context: typeof params.reason === 'string' ? params.reason : undefined,
-        });
-        this.setStatus('waiting');
-        break;
-      }
-      case 'item/tool/requestUserInput':
-        this.client.sendError(request.id, { message: 'item/tool/requestUserInput is not supported in this integration.' });
-        break;
-      case 'item/tool/call':
-        this.client.sendResponse(request.id, {
-          contentItems: [{ type: 'inputText', text: 'Dynamic tool calls are not supported in this integration.' }],
-          success: false,
-        });
-        break;
-      default:
-        this.client.sendError(request.id, { message: `Unsupported request: ${request.method}` });
-        break;
-    }
-  }
-
-  private resolvePendingTurn(turnId: string): void {
-    if (!turnId) {
-      if (this.pendingTurns.size === 1) {
-        const first = this.pendingTurns.keys().next().value as string | undefined;
-        if (first) {
-          this.resolvePendingTurn(first);
-        }
-      }
-      return;
-    }
-
-    const pending = this.pendingTurns.get(turnId);
-    if (!pending) return;
-
-    clearTimeout(pending.timer);
-    this.pendingTurns.delete(turnId);
-    pending.resolve();
-  }
-
-  private rejectPendingTurn(turnId: string, error: Error): void {
-    if (!turnId) return;
-    const pending = this.pendingTurns.get(turnId);
-    if (!pending) return;
-    clearTimeout(pending.timer);
-    this.pendingTurns.delete(turnId);
-    pending.reject(error);
-  }
-
-  private rejectAllPendingTurns(error: Error): void {
-    for (const [turnId, pending] of this.pendingTurns) {
-      clearTimeout(pending.timer);
-      pending.reject(error);
-      this.pendingTurns.delete(turnId);
-    }
-  }
-
   protected async doSendMessage(message: SDKMessage): Promise<void> {
-    if (!this.client || !this.threadId) {
+    if (!this.client) {
       await this.start();
     }
 
-    if (!this.client || !this.threadId) {
+    if (!this.client) {
       throw new Error('Codex client not initialized');
     }
 
     this.setStatus('working');
-    this.logRawJsonl('startTurn.input', {
-      threadId: this.threadId,
-      message,
-      approvalPolicy: this.getApprovalPolicy(),
-      model: this.config.model || null,
-    });
 
     try {
-      const response = await this.client.startTurn({
-        threadId: this.threadId,
-        input: [{ type: 'text', text: message.content, text_elements: [] }],
-        cwd: null,
+      const turn = this.client.send(message.content, {
         approvalPolicy: this.getApprovalPolicy(),
-        sandboxPolicy: null,
         model: this.config.model || null,
-        effort: null,
-        summary: null,
-        personality: null,
-        outputSchema: null,
-        collaborationMode: null,
       });
 
-      const turnId = String(response?.turn?.id || '');
-      this.logRawJsonl('startTurn.response', response);
-      this.activeTurnId = turnId || null;
-
-      if (!turnId) {
-        this.outputThrottler.flush(true);
-        this.setStatus('idle');
-        this.emit('complete');
-        return;
+      for await (const update of turn.updates()) {
+        await this.handleTurnUpdate(update);
       }
 
-      await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          this.pendingTurns.delete(turnId);
-          reject(new Error(`Codex turn timed out: ${turnId}`));
-        }, 10 * 60 * 1000);
-
-        this.pendingTurns.set(turnId, {
-          resolve,
-          reject,
-          timer,
-        });
-      });
+      const finalSnapshot = await turn.done;
+      const sessionId = finalSnapshot.providerThreadId || this.client?.providerThreadId || this.config.resumeSessionId;
+      if (sessionId && sessionId !== this.config.resumeSessionId) {
+        this.config.resumeSessionId = sessionId;
+        this.emit('metadata', { sessionId, model: this.config.model });
+      }
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error));
+      this.outputThrottler.flush(false);
+      this.activeOutputSegment = null;
+      this.resetOutputState();
       this.emitError(err);
       throw err;
     }
   }
 
+  private async handleTurnUpdate(update: any): Promise<void> {
+    switch (update.kind) {
+      case 'queued':
+      case 'started':
+        this.setStatus('working');
+        return;
+      case 'output':
+        this.handleOutput(update.snapshot);
+        return;
+      case 'tool_use':
+        this.handleToolUse(update.snapshot);
+        return;
+      case 'tool_result':
+        this.activeOutputSegment = null;
+        return;
+      case 'request':
+        await this.handleRequest(update.snapshot);
+        return;
+      case 'completed':
+        this.handleCompleted(update.snapshot);
+        return;
+      case 'error':
+        this.handleErrored(update.snapshot);
+        return;
+      default:
+        return;
+    }
+  }
+
+  private handleOutput(snapshot: any): void {
+    const kind = snapshot.currentOutputKind;
+    if (kind === 'text') {
+      if (this.activeOutputSegment === 'thinking') {
+        this.outputThrottler.flush(false);
+        this.resetOutputState();
+      }
+      this.activeOutputSegment = 'stdout';
+      if (snapshot.text) {
+        this.outputThrottler.addStdout(snapshot.text);
+      }
+      return;
+    }
+
+    if (kind === 'thinking') {
+      if (this.activeOutputSegment === 'stdout') {
+        this.outputThrottler.flush(false);
+        this.resetOutputState();
+      }
+      this.activeOutputSegment = 'thinking';
+      if (snapshot.thinking) {
+        this.outputThrottler.addThinking(snapshot.thinking);
+      }
+    }
+  }
+
+  private handleToolUse(snapshot: any): void {
+    this.outputThrottler.flush(false);
+    this.resetOutputState();
+    this.activeOutputSegment = null;
+
+    const toolUses = Array.isArray(snapshot.toolUses) ? snapshot.toolUses : [];
+    const latest = toolUses[toolUses.length - 1];
+    if (!latest) {
+      return;
+    }
+
+    this.emit('tool_use', {
+      toolName: latest.name,
+      toolId: latest.id,
+      input: latest.input || {},
+    } as ToolUseEvent);
+  }
+
+  private async handleRequest(snapshot: any): Promise<void> {
+    const openRequests = Array.isArray(snapshot.openRequests) ? snapshot.openRequests : [];
+    const request = openRequests[openRequests.length - 1];
+    if (!request) {
+      return;
+    }
+
+    if (request.kind === 'tool_call') {
+      await this.client.respondToToolCall(request.id, {
+        contentItems: [{ type: 'inputText', text: 'Dynamic tool calls are not supported in this integration.' }],
+        success: false,
+      });
+      return;
+    }
+
+    if ((this.approvalTracker as PendingApprovalTracker<PendingCodexRequest>).has(request.id)) {
+      return;
+    }
+
+    this.outputThrottler.flush(false);
+    this.resetOutputState();
+    this.activeOutputSegment = null;
+
+    const approvalEvent = this.toApprovalEvent(request);
+    (this.approvalTracker as PendingApprovalTracker<PendingCodexRequest>).add(request.id, {
+      requestId: request.id,
+      toolName: approvalEvent.toolName,
+      input: approvalEvent.toolInput,
+      createdAt: Date.now(),
+      requestKind: request.kind,
+    });
+
+    this.emit('approval', approvalEvent);
+    this.setStatus('waiting');
+  }
+
+  private toApprovalEvent(request: any): ApprovalEvent {
+    if (request.kind === 'question') {
+      const firstQuestion = Array.isArray(request.questions) ? request.questions[0] : undefined;
+      return {
+        requestId: request.id,
+        toolName: 'AskUserQuestion',
+        toolInput: {
+          question: firstQuestion?.question,
+          questions: (request.questions || []).map((question: any) => ({
+            id: question.id,
+            header: question.header,
+            question: question.question,
+            isOther: question.isOther,
+            isSecret: question.isSecret,
+            options: (question.options || []).map((option: any) => ({
+              label: option.label,
+              description: option.description,
+            })),
+          })),
+        },
+        context: firstQuestion?.question,
+        options: (firstQuestion?.options || []).map((option: any) => ({
+          label: option.label,
+          description: option.description,
+        })),
+      };
+    }
+
+    return {
+      requestId: request.id,
+      toolName: request.approvalKind === 'command' ? 'bash' : 'file_change',
+      toolInput: {
+        command: request.command,
+        cwd: request.cwd,
+        reason: request.reason,
+        grantRoot: request.grantRoot,
+        proposedExecPolicyAmendment: request.proposedExecPolicyAmendment,
+      },
+      context: request.reason || undefined,
+    };
+  }
+
+  private handleCompleted(snapshot: any): void {
+    const kind = snapshot.currentOutputKind;
+    if (kind === 'text' || kind === 'thinking') {
+      this.outputThrottler.flush(true);
+    } else {
+      this.outputThrottler.flush(false);
+      this.resetOutputState();
+    }
+
+    this.activeOutputSegment = null;
+    this.setStatus('idle');
+    this.emit('complete');
+  }
+
+  private handleErrored(snapshot: any): void {
+    this.outputThrottler.flush(false);
+    this.activeOutputSegment = null;
+    this.resetOutputState();
+    const message = snapshot?.result?.error?.message || snapshot?.currentMessage?.content || 'Codex turn failed.';
+    this.emitError(new Error(message));
+  }
+
   async sendToolResult(_result: SDKToolResult): Promise<void> {
-    // MCP tools execute inside Codex directly; no out-of-band tool result channel is used here.
+    // MCP tools execute inside Codex directly; no external tool result channel is used here.
   }
 
   async sendApproval(
     requestId: string,
     decision: 'allow' | 'deny',
-    _updatedInput?: Record<string, unknown>
+    updatedInput?: Record<string, unknown>
   ): Promise<void> {
-    if (!this.client) return;
+    if (!this.client) {
+      return;
+    }
 
-    const pending = this.pendingApprovals.get(requestId);
-    if (!pending) return;
+    const pending = (this.approvalTracker as PendingApprovalTracker<PendingCodexRequest>).get(requestId);
+    if (!pending) {
+      return;
+    }
 
     try {
-      if (pending.kind === 'command') {
-        this.client.sendResponse(pending.rpcRequestId, {
-          decision: decision === 'allow' ? 'accept' : 'decline',
-        });
+      if (pending.requestKind === 'question') {
+        const answer = decision === 'allow'
+          ? this.normalizeQuestionAnswerInput(updatedInput)
+          : '';
+        await this.client.answerQuestion(requestId, answer);
+      } else if (decision === 'allow') {
+        await this.client.approveRequest(requestId, { behavior: 'allow' });
       } else {
-        this.client.sendResponse(pending.rpcRequestId, {
-          decision: decision === 'allow' ? 'accept' : 'decline',
-        });
+        await this.client.denyRequest(requestId, 'Denied by user');
       }
     } catch (error) {
       console.warn('[CodexSDK] Error sending approval:', error);
-    } finally {
-      this.pendingApprovals.delete(requestId);
-      this.approvalTracker.delete(requestId);
-      if (!this.hasPendingApprovals()) {
-        this.setStatus('working');
-      }
+      return;
     }
+
+    this.approvalTracker.delete(requestId);
+    const remaining = (this.client.getOpenRequests?.() || []).filter((request: any) => request.kind !== 'tool_call').length;
+    this.setStatus(remaining > 0 ? 'waiting' : 'working');
+  }
+
+  private normalizeQuestionAnswerInput(updatedInput?: Record<string, unknown>): string | string[] | Record<string, string | string[]> {
+    if (!updatedInput) {
+      return '';
+    }
+
+    const answers = updatedInput.answers;
+    if (typeof answers === 'string' || Array.isArray(answers)) {
+      return answers as string | string[];
+    }
+
+    if (answers && typeof answers === 'object') {
+      const entries = Object.entries(answers as Record<string, unknown>);
+      if (entries.length === 1 && entries[0]) {
+        const onlyValue = entries[0][1];
+        if (typeof onlyValue === 'string' || Array.isArray(onlyValue)) {
+          return onlyValue as string | string[];
+        }
+      }
+
+      const normalized: Record<string, string | string[]> = {};
+      for (const [key, value] of entries) {
+        if (typeof value === 'string' || Array.isArray(value)) {
+          normalized[key] = value as string | string[];
+        }
+      }
+      return normalized;
+    }
+
+    if (typeof updatedInput.question === 'string') {
+      return updatedInput.question;
+    }
+
+    return '';
   }
 
   async close(): Promise<void> {
-    this.rejectAllPendingTurns(new Error('Codex session closed.'));
-
-    if (this.client && this.threadId && this.activeTurnId) {
-      try {
-        await this.client.interruptTurn({ threadId: this.threadId, turnId: this.activeTurnId });
-      } catch {
-        // Ignore interrupt failures on shutdown.
-      }
-    }
-
     if (this.client) {
       try {
-        await this.client.shutdown();
+        await this.client.close();
       } catch (error) {
         console.warn('[CodexSDK] Error during shutdown:', error);
       }
     }
 
     this.client = null;
-    this.threadId = null;
-    this.activeTurnId = null;
-    this.pendingApprovals.clear();
+    this.activeOutputSegment = null;
     this.approvalTracker.clear();
+    this.resetOutputState();
     this.setStatus('idle');
   }
 }

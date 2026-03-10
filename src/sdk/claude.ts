@@ -1,7 +1,7 @@
 /**
  * Claude SDK Client Wrapper
  *
- * Uses the structured v0.3.0 claude-client API so Squire receives a single
+ * Uses the structured claude-client API so Squire receives a single
  * normalized stream of text, thinking, tool, and approval state per turn.
  */
 

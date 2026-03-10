@@ -150,6 +150,16 @@ export interface WorkspaceContext {
   timezone?: string;
   /** CLI session ID for resuming conversations (persists context across restarts) */
   cliSessionId?: string;
+  /** Current SDK provider assigned to this workspace */
+  sdkProvider?: SDKProvider;
+  /** Current model assigned to this workspace */
+  sdkModel?: string;
+  /** Pending handoff summary to inject on the first turn after a switch */
+  pendingSwitchSummaryPath?: string;
+  /** Most recent handoff summary written for this workspace */
+  lastSwitchSummaryPath?: string;
+  /** Timestamp of the most recent SDK or model switch */
+  lastSwitchAt?: string;
   currentTask?: string;
   recentFiles?: string[];
   environment?: Record<string, string>;
