@@ -201,6 +201,18 @@ export class ClaudeSDKClient extends BaseSDKClient {
       this.turnWorkers.add(worker);
       worker.finally(() => this.turnWorkers.delete(worker));
       this.logRawJsonl('sendMessage.accepted', { messageLength: message.content.length, turnId: turn.current().id });
+      await worker;
+
+      await turn.done;
+      const sessionId = this.client?.sessionId || this.config.resumeSessionId;
+      if (sessionId && sessionId !== this.config.resumeSessionId) {
+        this.config.resumeSessionId = sessionId;
+        this.emit('metadata', {
+          model: this.config.model,
+          permissionMode: this.getClaudePermissionMode(),
+          sessionId,
+        });
+      }
     } catch (error) {
       this.logRawJsonl('sendMessage.error', { error: String(error) });
       console.error('[ClaudeSDK] Error sending message:', error);

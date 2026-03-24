@@ -32,6 +32,14 @@ function createSnapshot(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function createDeferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve = () => {};
+  const promise = new Promise<void>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 describe('ClaudeSDKClient structured migration', () => {
   it('falls back to tracked tool input when updatedInput is omitted', async () => {
     const client = createClient();
@@ -263,5 +271,63 @@ describe('ClaudeSDKClient structured migration', () => {
       { outputType: 'thinking', content: 'thinking...' },
     ]);
     expect(toolUses).toEqual([{ toolName: 'Bash', toolId: 'tool-1' }]);
+  });
+
+  it('keeps sendMessage pending until the Claude turn completes', async () => {
+    const client = createClient();
+    const gate = createDeferred();
+    const turnId = 'turn-1';
+
+    (client as any).client = {
+      send: vi.fn(() => ({
+        updates: async function* () {
+          yield {
+            kind: 'started',
+            turnId,
+            snapshot: createSnapshot(),
+          };
+
+          yield {
+            kind: 'output',
+            turnId,
+            snapshot: createSnapshot({
+              currentOutputKind: 'text',
+              currentMessage: { type: 'text', content: 'Hello there' },
+              text: 'Hello there',
+            }),
+          };
+
+          await gate.promise;
+
+          yield {
+            kind: 'completed',
+            turnId,
+            snapshot: createSnapshot({
+              status: 'completed',
+              currentOutputKind: 'text',
+              currentMessage: { type: 'text', content: 'Hello there' },
+              text: 'Hello there',
+            }),
+          };
+        },
+        done: Promise.resolve({ sessionId: 'session-2' }),
+        current: () => ({ id: turnId }),
+      })),
+      sessionId: 'session-1',
+    };
+
+    const sendPromise = client.sendMessage({ role: 'user', content: 'hi' });
+    let settled = false;
+    sendPromise.then(() => {
+      settled = true;
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    gate.resolve();
+    await sendPromise;
+    expect(settled).toBe(true);
   });
 });
