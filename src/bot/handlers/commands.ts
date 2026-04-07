@@ -541,6 +541,16 @@ const COMMANDS: Record<string, { handler: CommandHandler; help: string }> = {
     },
   },
 
+  interrupt: {
+    help: 'Interrupt the current run and reset this workspace session',
+    handler: async (ctx) => {
+      const interrupted = await ctx.squire.interruptWorkspaceRun(ctx.workspaceId);
+      return interrupted
+        ? 'Interrupted the current run and reset this workspace session.'
+        : 'No active run was detected, but I reset this workspace session so you can start fresh.';
+    },
+  },
+
   patterns: {
     help: 'Manage learned command patterns. Usage: !patterns [clear|stats]',
     handler: async (ctx, args) => {

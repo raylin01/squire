@@ -492,6 +492,7 @@ export type SquireEventType =
   | 'communication'
   | 'approval_required'
   | 'approval_auto'
+  | 'run_interrupted'
   | 'status';
 
 export interface SquireEvent {
@@ -526,6 +527,7 @@ export interface SquireInterface {
 
   // Messaging
   sendMessage(workspaceId: string, content: string): Promise<SquireMessage>;
+  interruptWorkspaceRun(workspaceId: string): Promise<boolean>;
 
   // Scheduling
   scheduleTask(options: ScheduleTaskOptions): Promise<ScheduledTask>;

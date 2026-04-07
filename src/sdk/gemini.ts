@@ -247,6 +247,27 @@ export class GeminiSDKClient extends BaseSDKClient {
     this.approvalTracker.delete(requestId);
   }
 
+  async interrupt(): Promise<boolean> {
+    const hadActiveTurn = this.client?.getCurrentTurn?.()?.status === 'running';
+
+    if (this.client) {
+      try {
+        await this.client.interrupt?.();
+      } catch (error) {
+        console.warn('[GeminiSDK] Error interrupting turn:', error);
+      }
+    }
+
+    this.messageQueue.clear(new Error('Run interrupted'));
+    this.approvalTracker.clear();
+    this.outputThrottler.flush(false);
+    this.resetOutputState();
+    this.activeOutputSegment = null;
+    this.setStatus('idle');
+
+    return Boolean(hadActiveTurn);
+  }
+
   async close(): Promise<void> {
     if (this.client) {
       try {

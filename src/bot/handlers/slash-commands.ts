@@ -110,6 +110,10 @@ const commands = [
   new SlashCommandBuilder()
     .setName('help')
     .setDescription('Get help with Squire commands'),
+
+  new SlashCommandBuilder()
+    .setName('interrupt')
+    .setDescription('Interrupt the current run and reset this channel/session'),
 ].map(cmd => cmd.toJSON());
 
 /**
@@ -206,6 +210,10 @@ export async function handleSlashCommand(
 
       case 'help':
         await handleHelp(interaction);
+        break;
+
+      case 'interrupt':
+        await handleInterrupt(interaction, squire);
         break;
 
       default:
@@ -401,6 +409,7 @@ async function handleHelp(interaction: ChatInputCommandInteraction): Promise<voi
   await interaction.editReply(
     `**Squire Commands**\n\n` +
     `**/status** - Check Squire status and activity\n\n` +
+    `**/interrupt** - Stop the current run and reset this workspace session\n\n` +
     `**/memory**\n` +
     `  • remember <content> - Store something in memory\n` +
     `  • recall <query> - Search memories\n` +
@@ -417,6 +426,24 @@ async function handleHelp(interaction: ChatInputCommandInteraction): Promise<voi
     `  • show - Show current configuration\n\n` +
     `**/help** - Show this help message\n\n` +
     `You can also just message me directly or mention me in a channel!`
+  );
+}
+
+async function handleInterrupt(
+  interaction: ChatInputCommandInteraction,
+  squire: Squire
+): Promise<void> {
+  const workspace = squire.getWorkspaces().find((candidate) => candidate.sourceId === interaction.channelId);
+  if (!workspace) {
+    await interaction.editReply('No workspace is linked to this channel yet, so there is no run to interrupt.');
+    return;
+  }
+
+  const interrupted = await squire.interruptWorkspaceRun(workspace.workspaceId);
+  await interaction.editReply(
+    interrupted
+      ? 'Interrupted the current run and reset this workspace session.'
+      : 'No active run was detected, but I reset this workspace session so you can continue cleanly.'
   );
 }
 

@@ -578,6 +578,29 @@ export class ClaudeSDKClient extends BaseSDKClient {
     }
   }
 
+  async interrupt(): Promise<boolean> {
+    const hadActiveTurn = this.client?.getCurrentTurn()?.status === 'running';
+    const hadPendingRequests = (this.client?.getOpenRequests?.() || []).length > 0;
+
+    if (this.client) {
+      try {
+        await this.client.interruptTurn();
+      } catch (error) {
+        this.logRawJsonl('interrupt.error', { error: String(error) });
+        console.warn('[ClaudeSDK] Error interrupting turn:', error);
+      }
+    }
+
+    this.messageQueue.clear(new Error('Run interrupted'));
+    this.approvalTracker.clear();
+    this.outputThrottler.flush(false);
+    this.resetOutputState();
+    this.activeOutputSegment = null;
+    this.setStatus('idle');
+
+    return Boolean(hadActiveTurn || hadPendingRequests);
+  }
+
   private normalizeQuestionAnswerInput(updatedInput?: Record<string, unknown>): string | string[] | Record<string, string | string[]> {
     if (!updatedInput) {
       return '';

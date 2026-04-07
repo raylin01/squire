@@ -75,7 +75,11 @@ export class Squire extends EventEmitter {
   private running: boolean = false;
 
   // Pending approvals (requestId -> approval info for learned patterns)
-  private pendingApprovals: Map<string, { toolName: string; toolInput: Record<string, unknown> }> = new Map();
+  private pendingApprovals: Map<string, {
+    toolName: string;
+    toolInput: Record<string, unknown>;
+    workspaceId?: string;
+  }> = new Map();
 
   // Subsystems
   private memoryManager: HybridMemoryManager | null = null;
@@ -1273,6 +1277,7 @@ export class Squire extends EventEmitter {
     this.pendingApprovals.set(event.requestId, {
       toolName: event.toolName,
       toolInput: event.toolInput,
+      workspaceId: event.workspaceId || this.activeWorkspaceId || undefined,
     });
 
     // Emit approval event for external handling (e.g., Discord, CLI)
@@ -1365,6 +1370,34 @@ export class Squire extends EventEmitter {
     const session = this.workspaceSessions.get(workspaceId);
     if (!session) return undefined;
     return session.getFirstPendingApprovalId();
+  }
+
+  /**
+   * Interrupt the current run for a workspace and reset its SDK session.
+   */
+  async interruptWorkspaceRun(workspaceId: string): Promise<boolean> {
+    const workspace = this.workspaces.get(workspaceId);
+    if (!workspace) {
+      throw new Error(`Workspace not found: ${workspaceId}`);
+    }
+
+    const session = this.workspaceSessions.get(workspaceId);
+    if (!session) {
+      return false;
+    }
+
+    const interrupted = await session.interrupt();
+
+    for (const [requestId, pending] of this.pendingApprovals.entries()) {
+      if (pending.workspaceId === workspaceId) {
+        this.pendingApprovals.delete(requestId);
+      }
+    }
+
+    this.updateActivity('ready');
+    this.emitEvent('run_interrupted', { workspaceId, interrupted });
+    console.log(`[Squire] Interrupted workspace run: ${workspaceId}`);
+    return interrupted;
   }
 
   // ==========================================================================

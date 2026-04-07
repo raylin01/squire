@@ -381,6 +381,35 @@ export class CodexSDKClient extends BaseSDKClient {
     this.setStatus(remaining > 0 ? 'waiting' : 'working');
   }
 
+  async interrupt(): Promise<boolean> {
+    if (!this.client) {
+      this.messageQueue.clear(new Error('Run interrupted'));
+      this.approvalTracker.clear();
+      this.resetOutputState();
+      this.activeOutputSegment = null;
+      this.setStatus('idle');
+      return false;
+    }
+
+    const hadActiveTurn = this.client.getCurrentTurn?.()?.status === 'running';
+    const hadPendingRequests = (this.client.getOpenRequests?.() || []).length > 0;
+
+    try {
+      await this.client.interruptCurrentTurn?.();
+    } catch (error) {
+      console.warn('[CodexSDK] Error interrupting turn:', error);
+    }
+
+    this.messageQueue.clear(new Error('Run interrupted'));
+    this.approvalTracker.clear();
+    this.outputThrottler.flush(false);
+    this.resetOutputState();
+    this.activeOutputSegment = null;
+    this.setStatus('idle');
+
+    return hadActiveTurn || hadPendingRequests;
+  }
+
   private normalizeQuestionAnswerInput(updatedInput?: Record<string, unknown>): string | string[] | Record<string, string | string[]> {
     if (!updatedInput) {
       return '';

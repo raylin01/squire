@@ -259,6 +259,24 @@ export class WorkspaceSession extends EventEmitter<WorkspaceSessionEvents> {
   }
 
   /**
+   * Interrupt the current run and reset the SDK session.
+   */
+  async interrupt(): Promise<boolean> {
+    if (!this.sdkClient) {
+      return false;
+    }
+
+    let interrupted = false;
+    try {
+      interrupted = await this.sdkClient.interrupt();
+    } finally {
+      await this.stop();
+    }
+
+    return interrupted;
+  }
+
+  /**
    * Check if session has pending approvals
    */
   hasPendingApprovals(): boolean {

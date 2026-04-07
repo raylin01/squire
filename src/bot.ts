@@ -318,6 +318,7 @@ async function main(): Promise<void> {
   const workspaceManager = new WorkspaceManager(squire, config);
   const communicator = new DiscordCommunicator(client);
   const outputRouter = new DiscordOutputRouter(communicator);
+  const pendingApprovalWorkspaces = new Map<string, string>();
 
   // Save session ID after Squire starts (SDK will have created/resumed a session)
   squire.on('squire_started', async () => {
@@ -439,6 +440,15 @@ async function main(): Promise<void> {
     outputRouter.handleComplete(workspaceId);
   });
 
+  squire.on('run_interrupted', async (event: any) => {
+    const workspaceId = event.data?.workspaceId as string | undefined;
+    if (!workspaceId) return;
+
+    communicator.stopTyping(workspaceId);
+    communicator.clearStreamingState(workspaceId);
+    outputRouter.resetWorkspace(workspaceId);
+  });
+
   // Handle scheduled task failures that need user action.
   squire.on('task_failed', async (event: any) => {
     try {
@@ -525,15 +535,27 @@ async function main(): Promise<void> {
         if (data.reason) {
           description += `\n**Reason:** ${data.reason}`;
         }
-        description += `\n\nType \`!approve\` to allow or \`!deny\` to reject.`;
+        description += `\n\nUse the buttons below, or fall back to \`!approve\` / \`!deny\`.`;
 
         const embed = new EmbedBuilder()
           .setTitle('Approval Required')
           .setDescription(description)
           .setColor(0xFFA500);  // Orange
 
+        const actionRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`approval:allow:${data.requestId}`)
+            .setLabel('Approve')
+            .setStyle(ButtonStyle.Success),
+          new ButtonBuilder()
+            .setCustomId(`approval:deny:${data.requestId}`)
+            .setLabel('Deny')
+            .setStyle(ButtonStyle.Danger)
+        );
+
         try {
-          await channel.send({ embeds: [embed] });
+          pendingApprovalWorkspaces.set(data.requestId as string, workspaceId);
+          await channel.send({ embeds: [embed], components: [actionRow] });
         } catch (error) {
           console.error('[Squire] Failed to send approval prompt:', error);
         }
@@ -642,6 +664,7 @@ async function main(): Promise<void> {
     // Set up question handlers for AskUserQuestion
     setupQuestionHandlers(squire, client);
     setupScheduledTaskActionHandler(client, squire);
+    setupApprovalActionHandler(client, squire, pendingApprovalWorkspaces);
 
     // Set up slash command handler
     setupSlashCommandHandler(client, squire);
@@ -711,6 +734,64 @@ function parseScheduledTaskAction(customId: string): { action: 'retry' | 'skip' 
     return { action, taskId };
   }
   return null;
+}
+
+function parseApprovalAction(customId: string): { action: 'allow' | 'deny'; requestId: string } | null {
+  if (!customId.startsWith('approval:')) {
+    return null;
+  }
+
+  const [, action, ...requestIdParts] = customId.split(':');
+  const requestId = requestIdParts.join(':');
+  if (!requestId) {
+    return null;
+  }
+
+  if (action === 'allow' || action === 'deny') {
+    return { action, requestId };
+  }
+
+  return null;
+}
+
+function setupApprovalActionHandler(
+  client: Client,
+  squire: Squire,
+  pendingApprovalWorkspaces: Map<string, string>
+): void {
+  client.on(Events.InteractionCreate, async (interaction: Interaction) => {
+    if (!interaction.isButton()) return;
+
+    const parsed = parseApprovalAction(interaction.customId);
+    if (!parsed) return;
+
+    const workspaceId = pendingApprovalWorkspaces.get(parsed.requestId);
+    if (!workspaceId) {
+      await interaction.reply({ content: 'This approval request is no longer active.', ephemeral: true });
+      return;
+    }
+
+    try {
+      await squire.respondToApproval(parsed.requestId, parsed.action === 'allow', workspaceId);
+      pendingApprovalWorkspaces.delete(parsed.requestId);
+      await interaction.update({ components: [] });
+      await interaction.followUp({
+        content: parsed.action === 'allow' ? 'Approved.' : 'Denied.',
+        ephemeral: true,
+      });
+    } catch (error) {
+      console.error('[Squire] Failed to handle approval button:', error);
+      const errorReply = {
+        content: 'I hit an error while handling that approval. Please try `!approve` or `!deny`.',
+        ephemeral: true,
+      };
+      if (interaction.replied || interaction.deferred) {
+        await interaction.followUp(errorReply);
+      } else {
+        await interaction.reply(errorReply);
+      }
+    }
+  });
 }
 
 function setupScheduledTaskActionHandler(client: Client, squire: Squire): void {

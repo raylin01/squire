@@ -187,8 +187,15 @@ export class MessageQueue {
         return this.sending;
     }
 
-    clear(): void {
+    clear(error?: Error): void {
+        const pending = this.queue;
         this.queue = [];
+
+        if (error) {
+            for (const item of pending) {
+                item.reject(error);
+            }
+        }
     }
 }
 
@@ -293,6 +300,7 @@ export abstract class BaseSDKClient extends EventEmitter<SDKClientEventMap> {
         decision: "allow" | "deny",
         updatedInput?: Record<string, unknown>,
     ): Promise<void>;
+    abstract interrupt(): Promise<boolean>;
     abstract close(): Promise<void>;
 
     // Optional methods with default implementations
