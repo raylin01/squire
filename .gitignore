@@ -59,3 +59,11 @@ daily-logs/
 *.sqlite
 *.sqlite3
 bun.lock
+
+# DisCode runner-agent session files (not part of Squire)
+/CLAUDE.md
+/CLAUDE.md.discode-inactive
+/.claude/skills/
+/.claude/skills.inactive/
+/.codex/skills/
+/.codex/skills.inactive/
