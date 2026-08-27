@@ -25,8 +25,15 @@ import { Squire, createSquire } from './index.js';
 import type { WorkspaceSource } from './index.js';
 import { loadConfig, saveConfig, createDefaultConfig, getConfigPath, getSquireBotDir, getWorkspaceSandboxDir } from './bot/config.js';
 import type { SquireBotConfig } from './bot/config.js';
+import {
+  ACCESS_DENIED_MESSAGE,
+  evaluateDiscordAccess,
+  warnIfAccessUnrestricted,
+} from './bot/access-control.js';
+import { shouldHandleGuildMessage } from './bot/guild-triggers.js';
 import { setupDmHandler } from './bot/handlers/dm.js';
 import { handleCommand, setupCommandHandler } from './bot/handlers/commands.js';
+import { setupForumHandler } from './bot/handlers/forum.js';
 import {
   handleAskUserQuestion,
   setupQuestionHandlers,
@@ -144,6 +151,10 @@ class WorkspaceManager {
 }
 
 async function main(): Promise<void> {
+  if (process.env.SQUIREBOT_DIR?.trim() && !process.env.SQUIRE_DIR?.trim()) {
+    process.env.SQUIRE_DIR = path.join(getSquireBotDir(), 'core');
+  }
+
   const args = process.argv.slice(2);
 
   // Parse flags
@@ -187,6 +198,8 @@ async function main(): Promise<void> {
     console.error(`Expected config at: ${getConfigPath()}`);
     process.exit(1);
   }
+
+  warnIfAccessUnrestricted(config);
 
   // Allow env overrides
   if (process.env.DISCORD_TOKEN) {
@@ -259,6 +272,12 @@ async function main(): Promise<void> {
     }
   }
 
+  if (!config.squireId) {
+    config.squireId = `squire-${Date.now()}`;
+    saveConfig(config);
+  }
+  const squireId = config.squireId;
+
   const configuredThrottleMs = config.squire?.outputThrottleMs;
   const effectiveThrottleMs = Number.isFinite(configuredThrottleMs) && (configuredThrottleMs as number) >= 0
     ? Math.floor(configuredThrottleMs as number)
@@ -274,6 +293,10 @@ async function main(): Promise<void> {
   }
 
   console.log('[SquireBot] Starting standalone Squire Discord bot...');
+  console.log(`[SquireBot] Config file: ${getConfigPath()}`);
+  if (process.env.SQUIREBOT_DIR?.trim()) {
+    console.log(`[SquireBot] Isolated bot dir: ${getSquireBotDir()}`);
+  }
 
   // Create Discord client
   const client = new Client({
@@ -291,7 +314,7 @@ async function main(): Promise<void> {
 
   // Create Squire instance
   const squireConfig = {
-    squireId: `squire-${Date.now()}`,
+    squireId,
     name: config.name || 'Squire',
     sdk: {
       provider: (config.squire?.provider || 'gemini') as 'claude' | 'gemini' | 'codex',
@@ -657,17 +680,17 @@ async function main(): Promise<void> {
     }
 
     // Set up message handlers
-    setupMessageHandler(client, squire, workspaceManager, communicator);
-    setupDmHandler(client, squire, workspaceManager, communicator);
-    // Note: Forum handler is now a plugin, loaded by pluginLoader
+    setupMessageHandler(client, squire, workspaceManager, communicator, config);
+    setupDmHandler(client, squire, workspaceManager, communicator, config);
+    setupForumHandler(client, squire, workspaceManager, communicator, config);
 
     // Set up question handlers for AskUserQuestion
-    setupQuestionHandlers(squire, client);
-    setupScheduledTaskActionHandler(client, squire);
-    setupApprovalActionHandler(client, squire, pendingApprovalWorkspaces);
+    setupQuestionHandlers(squire, client, config);
+    setupScheduledTaskActionHandler(client, squire, config);
+    setupApprovalActionHandler(client, squire, pendingApprovalWorkspaces, config);
 
     // Set up slash command handler
-    setupSlashCommandHandler(client, squire);
+    setupSlashCommandHandler(client, squire, config);
 
     // Register slash commands with Discord
     // If DISCORD_GUILD_ID is set, commands register instantly (for dev)
@@ -757,13 +780,24 @@ function parseApprovalAction(customId: string): { action: 'allow' | 'deny'; requ
 function setupApprovalActionHandler(
   client: Client,
   squire: Squire,
-  pendingApprovalWorkspaces: Map<string, string>
+  pendingApprovalWorkspaces: Map<string, string>,
+  config: SquireBotConfig
 ): void {
   client.on(Events.InteractionCreate, async (interaction: Interaction) => {
     if (!interaction.isButton()) return;
 
     const parsed = parseApprovalAction(interaction.customId);
     if (!parsed) return;
+
+    const access = evaluateDiscordAccess(config, {
+      userId: interaction.user.id,
+      guildId: interaction.guildId,
+    });
+    if (!access.allowed) {
+      console.warn(`[Access] Denied approval button: ${access.reason}`);
+      await interaction.reply({ content: ACCESS_DENIED_MESSAGE, ephemeral: true });
+      return;
+    }
 
     const workspaceId = pendingApprovalWorkspaces.get(parsed.requestId);
     if (!workspaceId) {
@@ -794,12 +828,22 @@ function setupApprovalActionHandler(
   });
 }
 
-function setupScheduledTaskActionHandler(client: Client, squire: Squire): void {
+function setupScheduledTaskActionHandler(client: Client, squire: Squire, config: SquireBotConfig): void {
   client.on(Events.InteractionCreate, async (interaction: Interaction) => {
     if (!interaction.isButton()) return;
 
     const parsed = parseScheduledTaskAction(interaction.customId);
     if (!parsed) return;
+
+    const access = evaluateDiscordAccess(config, {
+      userId: interaction.user.id,
+      guildId: interaction.guildId,
+    });
+    if (!access.allowed) {
+      console.warn(`[Access] Denied scheduled-task button: ${access.reason}`);
+      await interaction.reply({ content: ACCESS_DENIED_MESSAGE, ephemeral: true });
+      return;
+    }
 
     try {
       switch (parsed.action) {
@@ -840,7 +884,8 @@ function setupMessageHandler(
   client: Client,
   squire: Squire,
   workspaceManager: WorkspaceManager,
-  communicator: DiscordCommunicator
+  communicator: DiscordCommunicator,
+  config: SquireBotConfig
 ): void {
   client.on(Events.MessageCreate, async (message: Message) => {
     // Ignore bot messages
@@ -850,7 +895,25 @@ function setupMessageHandler(
     if (message.channel.type === ChannelType.DM) return;
     if (message.channel.isThread()) return;
 
-    // Get or create workspace for commands
+    const access = evaluateDiscordAccess(config, {
+      userId: message.author.id,
+      guildId: message.guildId,
+    });
+    if (!access.allowed) {
+      console.warn(`[Access] Denied guild message from ${message.author.id}: ${access.reason}`);
+      return;
+    }
+
+    const mentionedBot = Boolean(client.user && message.mentions.has(client.user.id));
+    if (!shouldHandleGuildMessage({
+      content: message.content,
+      botUserId: client.user?.id,
+      mentionedBot,
+    })) {
+      return;
+    }
+
+    // Get or create workspace for commands / mentioned chat
     const channelName = 'name' in message.channel ? (message.channel as { name: string }).name : 'unknown';
     const workspaceId = await workspaceManager.getOrCreateWorkspace(
       message.channelId,

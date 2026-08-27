@@ -5,7 +5,7 @@
  */
 
 // Import and re-export from registry (no circular deps)
-export { toolRegistry, defineTool, setExecutionContext, getExecutionContext, clearExecutionContext } from './registry.js';
+export { toolRegistry, defineTool, setExecutionContext, getExecutionContext, clearExecutionContext, runWithExecutionContext } from './registry.js';
 export type { ToolHandler, RegisteredTool, ToolExecutionContext } from './registry.js';
 
 // Re-export setSquireInstance from self-modify (after registry import to avoid circular)

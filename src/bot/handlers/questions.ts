@@ -24,6 +24,11 @@ import {
   ButtonInteraction,
 } from 'discord.js';
 import type { Squire } from '../../index.js';
+import {
+  ACCESS_DENIED_MESSAGE,
+  evaluateDiscordAccess,
+} from '../access-control.js';
+import type { SquireBotConfig } from '../config.js';
 
 /**
  * Pending question state
@@ -43,6 +48,38 @@ interface PendingQuestion {
 
 // Store pending questions by requestId
 const pendingQuestions = new Map<string, PendingQuestion>();
+let questionSquire: Squire | null = null;
+let questionCleanupTimer: NodeJS.Timeout | null = null;
+
+export function encodeQuestionCustomId(action: string, requestId: string, value?: string): string {
+  return value === undefined
+    ? `q|${action}|${requestId}`
+    : `q|${action}|${requestId}|${value}`;
+}
+
+export function parseQuestionCustomId(customId: string): { action: string; requestId: string; value?: string } | null {
+  if (customId.startsWith('q|')) {
+    const [, action, requestId, ...valueParts] = customId.split('|');
+    if (!action || !requestId) {
+      return null;
+    }
+    const value = valueParts.length > 0 ? valueParts.join('|') : undefined;
+    return { action, requestId, value };
+  }
+
+  if (customId.startsWith('question_')) {
+    const parts = customId.split('_');
+    const action = parts[1];
+    const requestId = parts[2];
+    const value = parts.slice(3).join('_') || undefined;
+    if (!action || !requestId) {
+      return null;
+    }
+    return { action, requestId, value };
+  }
+
+  return null;
+}
 
 // Store recently expired questions (requestId -> workspaceId) for resend requests
 const expiredQuestions = new Map<string, { workspaceId: string; expiredAt: Date }>();
@@ -173,7 +210,7 @@ function createQuestionButtons(
   if (options.length === 0) {
     // No options - just a text response needed
     const otherButton = new ButtonBuilder()
-      .setCustomId(`question_other_${requestId}`)
+      .setCustomId(encodeQuestionCustomId('other', requestId))
       .setLabel('Type Answer')
       .setStyle(ButtonStyle.Primary);
 
@@ -185,7 +222,7 @@ function createQuestionButtons(
     // Multi-select: toggleable buttons + Submit
     const optionButtons = options.map((opt, idx) => {
       return new ButtonBuilder()
-        .setCustomId(`question_toggle_${requestId}_${opt.value}`)
+        .setCustomId(encodeQuestionCustomId('toggle', requestId, opt.value))
         .setLabel(opt.label.length > 80 ? opt.label.slice(0, 77) + '...' : opt.label)
         .setStyle(ButtonStyle.Secondary);
     });
@@ -198,7 +235,7 @@ function createQuestionButtons(
 
     // Submit and Other buttons
     const submitButton = new ButtonBuilder()
-      .setCustomId(`question_submit_${requestId}`)
+      .setCustomId(encodeQuestionCustomId('submit', requestId))
       .setLabel('Submit')
       .setStyle(ButtonStyle.Success);
 
@@ -206,7 +243,7 @@ function createQuestionButtons(
 
     if (hasOther) {
       const otherButton = new ButtonBuilder()
-        .setCustomId(`question_other_${requestId}`)
+        .setCustomId(encodeQuestionCustomId('other', requestId))
         .setLabel('Other...')
         .setStyle(ButtonStyle.Primary);
       actionButtons.push(otherButton);
@@ -217,7 +254,7 @@ function createQuestionButtons(
     // Single-select: each button submits immediately
     const optionButtons = options.map((opt) => {
       return new ButtonBuilder()
-        .setCustomId(`question_select_${requestId}_${opt.value}`)
+        .setCustomId(encodeQuestionCustomId('select', requestId, opt.value))
         .setLabel(opt.label.length > 80 ? opt.label.slice(0, 77) + '...' : opt.label)
         .setStyle(ButtonStyle.Primary);
     });
@@ -231,7 +268,7 @@ function createQuestionButtons(
     // Other button in separate row
     if (hasOther) {
       const otherButton = new ButtonBuilder()
-        .setCustomId(`question_other_${requestId}`)
+        .setCustomId(encodeQuestionCustomId('other', requestId))
         .setLabel('Other...')
         .setStyle(ButtonStyle.Secondary);
       rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(otherButton));
@@ -246,18 +283,37 @@ function createQuestionButtons(
  */
 export function setupQuestionHandlers(
   squire: Squire,
-  client: any
+  client: any,
+  config: SquireBotConfig
 ): void {
+  questionSquire = squire;
+  if (!questionCleanupTimer) {
+    questionCleanupTimer = setInterval(() => {
+      void cleanupExpiredQuestions();
+    }, 60_000);
+    questionCleanupTimer.unref();
+  }
+
   client.on(Events.InteractionCreate, async (interaction: Interaction) => {
     if (!interaction.isButton()) return;
 
     const customId = interaction.customId;
-    if (!customId.startsWith('question_')) return;
+    const parsed = parseQuestionCustomId(customId);
+    if (!parsed) return;
 
-    const parts = customId.split('_');
-    const action = parts[1]; // select, toggle, submit, other
-    const requestId = parts[2];
-    const value = parts[3]; // Option value for select/toggle
+    const access = evaluateDiscordAccess(config, {
+      userId: interaction.user.id,
+      guildId: interaction.guildId,
+    });
+    if (!access.allowed) {
+      console.warn(`[Access] Denied question button from ${interaction.user.id}: ${access.reason}`);
+      await interaction.reply({ content: ACCESS_DENIED_MESSAGE, ephemeral: true });
+      return;
+    }
+
+    const action = parsed.action;
+    const requestId = parsed.requestId;
+    const value = parsed.value;
 
     const pending = pendingQuestions.get(requestId);
     if (!pending) {
@@ -283,6 +339,7 @@ export function setupQuestionHandlers(
     try {
       if (action === 'select') {
         // Single-select: immediately submit
+        if (!value) return;
         await interaction.deferUpdate();
 
         const selectedOption = pending.options.find(o => o.value === value);
@@ -297,6 +354,7 @@ export function setupQuestionHandlers(
 
       } else if (action === 'toggle') {
         // Multi-select toggle
+        if (!value) return;
         await interaction.deferUpdate();
 
         if (pending.selectedOptions.has(value)) {
@@ -433,21 +491,26 @@ async function submitAnswer(
 /**
  * Clean up expired questions (call periodically)
  */
-export function cleanupExpiredQuestions(): void {
+export async function cleanupExpiredQuestions(): Promise<void> {
   const now = Date.now();
   const expireMs = 5 * 60 * 1000; // 5 minutes
   const expiredKeepMs = 10 * 60 * 1000; // Keep expired refs for 10 minutes
 
-  // Clean up pending questions
   for (const [requestId, pending] of pendingQuestions) {
     if (now - pending.createdAt.getTime() > expireMs) {
       console.log(`[Questions] Question expired: ${requestId}`);
-      // Store in expired map for resend capability
       expiredQuestions.set(requestId, {
         workspaceId: pending.workspaceId,
         expiredAt: new Date()
       });
       pendingQuestions.delete(requestId);
+      if (questionSquire) {
+        try {
+          await questionSquire.respondToApproval(requestId, false, pending.workspaceId);
+        } catch (error) {
+          console.warn(`[Questions] Failed to deny expired question ${requestId}: ${error}`);
+        }
+      }
     }
   }
 

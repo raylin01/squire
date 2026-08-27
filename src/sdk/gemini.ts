@@ -130,7 +130,7 @@ export class GeminiSDKClient extends BaseSDKClient {
     this.setStatus('working');
 
     try {
-      const turn = this.client.send(message.content, {
+      const turn = this.client.send(this.materializeMessageForTextCli(message), {
         runOptions: {
           outputFormat: 'stream-json',
           allowedMcpServerNames: this.allowedMcpServerNames,
@@ -241,10 +241,39 @@ export class GeminiSDKClient extends BaseSDKClient {
 
   async sendApproval(
     requestId: string,
-    _decision: 'allow' | 'deny',
-    _updatedInput?: Record<string, unknown>
+    decision: 'allow' | 'deny',
+    updatedInput?: Record<string, unknown>
   ): Promise<void> {
-    this.approvalTracker.delete(requestId);
+    const pending = this.approvalTracker.get(requestId);
+
+    if (this.client && typeof this.client.approveRequest === 'function' && decision === 'allow') {
+      await this.client.approveRequest(requestId, {
+        updatedInput: updatedInput ?? pending?.input ?? {},
+        message: 'Approved',
+      });
+      this.approvalTracker.delete(requestId);
+      this.setStatus(this.approvalTracker.size() === 0 ? 'working' : 'waiting');
+      return;
+    }
+
+    if (this.client && typeof this.client.denyRequest === 'function' && decision === 'deny') {
+      await this.client.denyRequest(requestId, 'Denied by user');
+      this.approvalTracker.delete(requestId);
+      this.setStatus(this.approvalTracker.size() === 0 ? 'working' : 'waiting');
+      return;
+    }
+
+    // Structured Gemini CLI has no approval response channel. Never pretend an
+    // allow succeeded. A deny interrupts the in-flight turn so work stops.
+    if (decision === 'deny') {
+      await this.interrupt();
+      this.approvalTracker.delete(requestId);
+      return;
+    }
+
+    throw new Error(
+      `Gemini cannot apply an allow decision for ${requestId}; the CLI has no approval response channel`
+    );
   }
 
   async interrupt(): Promise<boolean> {

@@ -34,6 +34,7 @@ export class Scheduler {
   private lifecycleHandlers: SchedulerLifecycleHandlers = {};
   private intervalId: NodeJS.Timeout | null = null;
   private running: boolean = false;
+  private polling: boolean = false;
 
   constructor(options: SchedulerOptions) {
     this.storage = new TaskStorage(options.dbPath);
@@ -216,16 +217,24 @@ export class Scheduler {
    * Poll for due tasks and execute them
    */
   private async poll(): Promise<void> {
-    const dueTasks = this.storage.getDueTasks();
-
-    if (dueTasks.length === 0) {
+    if (this.polling) {
       return;
     }
+    this.polling = true;
+    try {
+      const dueTasks = this.storage.claimDueTasks();
 
-    console.log(`[Scheduler] Found ${dueTasks.length} due task(s)`);
+      if (dueTasks.length === 0) {
+        return;
+      }
 
-    for (const task of dueTasks) {
-      await this.executeTask(task);
+      console.log(`[Scheduler] Found ${dueTasks.length} due task(s)`);
+
+      for (const task of dueTasks) {
+        await this.executeTask(task);
+      }
+    } finally {
+      this.polling = false;
     }
   }
 
@@ -257,8 +266,6 @@ export class Scheduler {
 
     console.log(`[Scheduler] Executing task ${runnableTask.taskId}: "${runnableTask.description}"`);
 
-    // Mark as running.
-    this.storage.updateStatus(runnableTask.taskId, 'running');
     const runId = this.storage.startRun(runnableTask.taskId);
 
     let result: TaskResult;

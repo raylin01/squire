@@ -227,6 +227,9 @@ describe('ForumBridge', () => {
           'Priority: High',
         ]),
       });
+
+      const stored = ticketManager.get(ticket.ticketId);
+      expect(stored?.forumPostId).toBe('post-123');
     });
 
     it('should warn if no sendForumPost handler', async () => {

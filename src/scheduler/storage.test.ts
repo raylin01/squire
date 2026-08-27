@@ -101,6 +101,21 @@ describe('TaskStorage', () => {
     expect(storage.disableTask('task-1')).toBe(true);
     expect(storage.getTask('task-1')?.status).toBe('cancelled');
   });
+
+  it('claims a due task only once across overlapping pollers', () => {
+    const past = new Date(Date.now() - 60_000).toISOString();
+    storage.addTask(createTestTask('once', { nextRunAt: past, status: 'pending' }));
+
+    const other = new TaskStorage(dbPath);
+    try {
+      const first = storage.claimDueTasks();
+      const second = other.claimDueTasks();
+      expect([...first, ...second].map((task) => task.taskId)).toEqual(['once']);
+      expect(storage.getTask('once')?.status).toBe('running');
+    } finally {
+      other.close();
+    }
+  });
 });
 
 function createTestTask(taskId: string, options: Partial<ScheduledTask> = {}): ScheduledTask {

@@ -14,6 +14,7 @@ import type { PersonalityTemplateName } from '../personality/templates.js';
 let squireInstance: {
   getConfig(): any;
   getPersonalityManager(): any;
+  remember?(content: string, category?: string): Promise<unknown>;
 } | null = null;
 
 /**
@@ -44,7 +45,7 @@ defineTool(
     }
 
     // Update config
-    const config = loadConfig();
+    const config = loadConfig() ?? squireInstance?.getConfig();
     if (config) {
       config.name = newName.trim();
       saveConfig(config);
@@ -94,9 +95,13 @@ defineTool(
     }
 
     // Update config
-    const config = loadConfig();
+    const config = loadConfig() ?? squireInstance?.getConfig();
     if (config) {
-      config.personality.default = { ...template };
+      if (!config.personality) {
+        config.personality = { default: { ...template }, workspaceOverrides: {} };
+      } else {
+        config.personality.default = { ...template };
+      }
       saveConfig(config);
     }
 
@@ -141,14 +146,30 @@ defineTool(
     const content = input.content as string;
     const category = (input.category as string) || 'facts';
 
-    // This will be handled by the memory tool integration
-    // For now, return success - the actual memory storage happens via the memory manager
-    return JSON.stringify({
-      success: true,
-      message: `I'll remember: "${content}"`,
-      category,
-      note: 'Use the remember function from the main Squire API for persistent storage',
-    });
+    if (!squireInstance?.remember) {
+      return JSON.stringify({
+        success: false,
+        error: 'Memory system is not available',
+        category,
+      });
+    }
+
+    try {
+      const entry = await squireInstance.remember(content, category);
+      return JSON.stringify({
+        success: true,
+        message: `I'll remember: "${content}"`,
+        category,
+        entry,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return JSON.stringify({
+        success: false,
+        error: message,
+        category,
+      });
+    }
   }
 );
 

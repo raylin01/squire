@@ -12,6 +12,7 @@ import {
 } from 'discord.js';
 import type { Client } from 'discord.js';
 import type { Squire } from '../../index.js';
+import { evaluateDiscordAccess } from '../access-control.js';
 import type { SquireBotConfig } from '../config.js';
 
 interface WorkspaceManager {
@@ -47,6 +48,15 @@ export function setupForumHandler(
 
     // Only watch configured forums, or all if none configured
     if (configuredForums.size > 0 && !configuredForums.has(parent.id)) return;
+
+    const access = evaluateDiscordAccess(config, {
+      userId: thread.ownerId || '',
+      guildId: thread.guildId,
+    });
+    if (!access.allowed) {
+      console.warn(`[Access] Denied forum post from ${thread.ownerId}: ${access.reason}`);
+      return;
+    }
 
     // Get the starter message
     let content = '';
@@ -95,6 +105,15 @@ export function setupForumHandler(
 
     // Only watch configured forums, or all if none configured
     if (configuredForums.size > 0 && !configuredForums.has(parent.id)) return;
+
+    const access = evaluateDiscordAccess(config, {
+      userId: message.author.id,
+      guildId: message.guildId,
+    });
+    if (!access.allowed) {
+      console.warn(`[Access] Denied forum reply from ${message.author.id}: ${access.reason}`);
+      return;
+    }
 
     const content = message.content.trim();
     if (!content) return;

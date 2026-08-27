@@ -330,4 +330,21 @@ describe('ClaudeSDKClient structured migration', () => {
     await sendPromise;
     expect(settled).toBe(true);
   });
+
+  it('does not auto-approve mutating Squire MCP tools in autoSafe', () => {
+    const client = new ClaudeSDKClient({
+      provider: 'claude',
+      cwd: process.cwd(),
+      permissionMode: 'autoSafe',
+      outputThrottleMs: 0,
+    });
+
+    const approved = (client as any).shouldAutoApprove({
+      kind: 'tool_approval',
+      toolName: 'mcp__squire__plugin_create',
+      input: { name: 'x', code: 'export default {}' },
+    });
+
+    expect(approved).toBe(false);
+  });
 });

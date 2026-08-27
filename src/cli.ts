@@ -8,6 +8,8 @@
 
 import { spawn } from 'child_process';
 import { createInterface } from 'readline';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { Squire, createSquire } from './squire.js';
 import { loadConfig, saveConfig, createDefaultConfig, initConfig, getConfigPath } from './config.js';
 import type { SquireConfig } from './types.js';
@@ -112,10 +114,9 @@ function printVersion(): void {
 async function startBot(): Promise<void> {
   console.log('Starting Squire Discord bot...');
 
-  // Find squire-bot binary
-  const botPath = require.resolve?.('@squire/bot') || '../squire-bot/dist/index.js';
+  const botPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'bot.js');
 
-  const bot = spawn('node', [botPath], {
+  const bot = spawn(process.execPath, [botPath], {
     stdio: 'inherit',
     env: process.env,
   });

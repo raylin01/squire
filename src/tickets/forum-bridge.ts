@@ -170,9 +170,8 @@ export class ForumBridge {
       tags,
     });
 
-    // Update ticket with forum post ID
     const updated = this.ticketManager.update(ticket.ticketId, {
-      status: ticket.status,
+      forumPostId: postId,
     });
 
     console.log(`[ForumBridge] Created forum post ${postId} for ticket ${ticket.ticketId}`);

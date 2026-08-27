@@ -270,6 +270,10 @@ export class WorkspaceSession extends EventEmitter<WorkspaceSessionEvents> {
     try {
       interrupted = await this.sdkClient.interrupt();
     } finally {
+      this.workspace.context = {
+        ...this.workspace.context,
+        cliSessionId: undefined,
+      };
       await this.stop();
     }
 

@@ -8,6 +8,7 @@
 import type { SDKTool } from '../sdk/types.js';
 import type { SquireTool, ToolHandlerContext } from '../types.js';
 import type { ToolLoader, ToolHandler as ExternalToolHandler } from './loader.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 export interface ToolHandler {
   (input: Record<string, unknown>): Promise<string>;
@@ -27,19 +28,33 @@ export interface ToolExecutionContext {
   workspaceId?: string;
 }
 
-// Current execution context (thread-local pattern)
-let currentExecutionContext: ToolExecutionContext = {};
+const executionContext = new AsyncLocalStorage<ToolExecutionContext>();
+
+export function runWithExecutionContext<T>(
+  context: ToolExecutionContext,
+  fn: () => Promise<T>
+): Promise<T> {
+  return executionContext.run(context, fn);
+}
 
 export function setExecutionContext(context: ToolExecutionContext): void {
-  currentExecutionContext = context;
+  const store = executionContext.getStore();
+  if (store) {
+    store.workspaceId = context.workspaceId;
+    return;
+  }
+  executionContext.enterWith({ ...context });
 }
 
 export function getExecutionContext(): ToolExecutionContext {
-  return currentExecutionContext;
+  return executionContext.getStore() ?? {};
 }
 
 export function clearExecutionContext(): void {
-  currentExecutionContext = {};
+  const store = executionContext.getStore();
+  if (store) {
+    store.workspaceId = undefined;
+  }
 }
 
 class ToolRegistry {

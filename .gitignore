@@ -36,14 +36,17 @@ npm-debug.log*
 # Test coverage
 coverage/
 
-# Squire data (user-specific)
+# User runtime data — never commit. Actual memories/config live under
+# ~/.squire and ~/.squirebot (outside this repo). src/memory/ is application
+# source for the memory engine, not private user files.
 .squire/
+.squirebot/
 
-# Squire data files
+# Runtime data dirs only at the repo root (not src/memory/)
 workspaces.json
 tickets.db
 scheduler.db
-memory/
+/memory/
 MEMORY.md
 daily-logs/
 

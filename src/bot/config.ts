@@ -8,9 +8,21 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 
-const SQUIREBOT_DIR = path.join(os.homedir(), '.squirebot');
-const CONFIG_FILE = path.join(SQUIREBOT_DIR, 'config.json');
-const WORKSPACES_DIR = path.join(SQUIREBOT_DIR, 'workspaces');
+export function getSquireBotDir(): string {
+  const fromEnv = process.env.SQUIREBOT_DIR?.trim();
+  if (fromEnv) {
+    return path.resolve(fromEnv);
+  }
+  return path.join(os.homedir(), '.squirebot');
+}
+
+function getConfigFilePath(): string {
+  return path.join(getSquireBotDir(), 'config.json');
+}
+
+function getWorkspacesRoot(): string {
+  return path.join(getSquireBotDir(), 'workspaces');
+}
 
 export interface SquireBotConfig {
   // Discord
@@ -30,6 +42,7 @@ export interface SquireBotConfig {
 
   // Squire identity
   name?: string;
+  squireId?: string;
 
   // SDK session persistence
   resumeSessionId?: string;
@@ -81,18 +94,20 @@ export interface ForumConfig {
 }
 
 export function ensureConfigDir(): void {
-  if (!fs.existsSync(SQUIREBOT_DIR)) {
-    fs.mkdirSync(SQUIREBOT_DIR, { recursive: true });
+  const dir = getSquireBotDir();
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
   }
 }
 
 export function loadConfig(): SquireBotConfig | null {
-  if (!fs.existsSync(CONFIG_FILE)) {
+  const configFile = getConfigFilePath();
+  if (!fs.existsSync(configFile)) {
     return null;
   }
 
   try {
-    const content = fs.readFileSync(CONFIG_FILE, 'utf-8');
+    const content = fs.readFileSync(configFile, 'utf-8');
     return JSON.parse(content) as SquireBotConfig;
   } catch (error) {
     console.error(`[SquireBot] Error loading config: ${error}`);
@@ -103,7 +118,7 @@ export function loadConfig(): SquireBotConfig | null {
 export function saveConfig(config: SquireBotConfig): void {
   ensureConfigDir();
   const content = JSON.stringify(config, null, 2);
-  fs.writeFileSync(CONFIG_FILE, content, 'utf-8');
+  fs.writeFileSync(getConfigFilePath(), content, 'utf-8');
 }
 
 export function createDefaultConfig(
@@ -133,11 +148,7 @@ export function createDefaultConfig(
 }
 
 export function getConfigPath(): string {
-  return CONFIG_FILE;
-}
-
-export function getSquireBotDir(): string {
-  return SQUIREBOT_DIR;
+  return getConfigFilePath();
 }
 
 /**
@@ -147,7 +158,7 @@ export function getSquireBotDir(): string {
 export function getWorkspaceSandboxDir(workspaceId: string): string {
   // Use first 8 chars of workspaceId for readable directory names
   const shortId = workspaceId.slice(0, 8);
-  const sandboxDir = path.join(WORKSPACES_DIR, shortId);
+  const sandboxDir = path.join(getWorkspacesRoot(), shortId);
 
   if (!fs.existsSync(sandboxDir)) {
     fs.mkdirSync(sandboxDir, { recursive: true });
@@ -161,8 +172,9 @@ export function getWorkspaceSandboxDir(workspaceId: string): string {
  * Get the base workspaces directory
  */
 export function getWorkspacesDir(): string {
-  if (!fs.existsSync(WORKSPACES_DIR)) {
-    fs.mkdirSync(WORKSPACES_DIR, { recursive: true });
+  const workspacesDir = getWorkspacesRoot();
+  if (!fs.existsSync(workspacesDir)) {
+    fs.mkdirSync(workspacesDir, { recursive: true });
   }
-  return WORKSPACES_DIR;
+  return workspacesDir;
 }

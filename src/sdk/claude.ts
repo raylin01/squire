@@ -13,7 +13,7 @@ import {
   ToolUseEvent,
   ApprovalEvent,
 } from './types.js';
-import { shouldAutoApproveInSafeMode, getDangerousReason, isSquireNativeTool } from '../permissions/safe-tools.js';
+import { shouldAutoApproveTool, getDangerousReason } from '../permissions/safe-tools.js';
 import { appendFileSync, mkdirSync } from 'fs';
 import { dirname } from 'path';
 import type {
@@ -404,13 +404,10 @@ export class ClaudeSDKClient extends BaseSDKClient {
     const toolName = request.toolName;
     const input = request.input || {};
     const permissionMode = this.config.permissionMode;
-    const squireNativeTool = isSquireNativeTool(toolName);
-    const shouldAutoApprove = squireNativeTool
-      || permissionMode === 'permissive'
-      || (permissionMode === 'autoSafe' && shouldAutoApproveInSafeMode(toolName, input));
+    const shouldAutoApprove = shouldAutoApproveTool(toolName, input, permissionMode);
 
     if (shouldAutoApprove) {
-      console.log(`[ClaudeSDK] Auto-approving: ${toolName} (mode: ${permissionMode}${squireNativeTool ? ', squire-native' : ''})`);
+      console.log(`[ClaudeSDK] Auto-approving: ${toolName} (mode: ${permissionMode})`);
       return true;
     }
 

@@ -57,6 +57,7 @@ export class CoreMemoryManager {
   private memoryFile: string;
   private entries: Map<string, CoreMemoryEntry> = new Map();
   private loaded: boolean = false;
+  private mutationChain: Promise<unknown> = Promise.resolve();
 
   constructor(options: CoreMemoryOptions) {
     this.memoryDir = options.memoryDir;
@@ -139,26 +140,27 @@ export class CoreMemoryManager {
       evidence?: string;
     }
   ): Promise<CoreMemoryEntry> {
-    await this.load();
+    return this.mutate(async () => {
+      await this.load();
 
-    const entry: CoreMemoryEntry = {
-      id: uuid(),
-      type: options?.type || 'fact',
-      content,
-      confidence: options?.confidence ?? 1.0,
-      source: options?.source || 'user',
-      workspaceId: options?.workspaceId,
-      tags: options?.tags || [],
-      evidence: options?.evidence,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      referenceCount: 0,
-    };
+      const entry: CoreMemoryEntry = {
+        id: uuid(),
+        type: options?.type || 'fact',
+        content,
+        confidence: options?.confidence ?? 1.0,
+        source: options?.source || 'user',
+        workspaceId: options?.workspaceId,
+        tags: options?.tags || [],
+        evidence: options?.evidence,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        referenceCount: 0,
+      };
 
-    this.entries.set(entry.id, entry);
-    await this.save();
-
-    return entry;
+      this.entries.set(entry.id, entry);
+      await this.saveNow();
+      return entry;
+    });
   }
 
   /**
@@ -286,23 +288,27 @@ export class CoreMemoryManager {
    * Update an entry
    */
   async update(id: string, updates: Partial<CoreMemoryEntry>): Promise<boolean> {
-    const entry = this.entries.get(id);
-    if (!entry) return false;
+    return this.mutate(async () => {
+      const entry = this.entries.get(id);
+      if (!entry) return false;
 
-    Object.assign(entry, updates, { updatedAt: new Date().toISOString() });
-    await this.save();
-    return true;
+      Object.assign(entry, updates, { updatedAt: new Date().toISOString() });
+      await this.saveNow();
+      return true;
+    });
   }
 
   /**
    * Delete an entry
    */
   async delete(id: string): Promise<boolean> {
-    const existed = this.entries.delete(id);
-    if (existed) {
-      await this.save();
-    }
-    return existed;
+    return this.mutate(async () => {
+      const existed = this.entries.delete(id);
+      if (existed) {
+        await this.saveNow();
+      }
+      return existed;
+    });
   }
 
   /**
@@ -361,10 +367,16 @@ export class CoreMemoryManager {
     return lines.join('\n');
   }
 
+  private async mutate<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.mutationChain.then(fn, fn);
+    this.mutationChain = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
   /**
    * Save to file
    */
-  private async save(): Promise<void> {
+  private async saveNow(): Promise<void> {
     const content = this.toMarkdown();
     fs.writeFileSync(this.memoryFile, content, 'utf-8');
   }
@@ -408,6 +420,8 @@ export class CoreMemoryManager {
           if (entry.tags.length > 0) {
             line += ` #${entry.tags.join(' #')}`;
           }
+
+          line += ` ${encodeMemoryMarker(entry)}`;
 
           lines.push(line);
         }
@@ -483,6 +497,9 @@ export class CoreMemoryManager {
       content = content.replace(/_\[\d+% confident\]_/, '').trim();
     }
 
+    const parsed = parseMemoryMarker(content);
+    content = parsed.content;
+
     // Extract tags
     const tags: string[] = [];
     const tagMatch = content.matchAll(/#(\w+)/g);
@@ -491,17 +508,20 @@ export class CoreMemoryManager {
       content = content.replace(`#${match[1]}`, '').trim();
     }
 
+    const now = new Date().toISOString();
     const entry: CoreMemoryEntry = {
-      id: uuid(),
+      id: parsed.id || uuid(),
       type,
       content,
       confidence,
-      source: 'user',
+      source: parsed.source || 'user',
+      workspaceId: parsed.workspaceId,
       tags,
       evidence,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      referenceCount: 0,
+      createdAt: parsed.createdAt || now,
+      updatedAt: parsed.updatedAt || now,
+      lastReferenced: parsed.lastReferenced,
+      referenceCount: parsed.referenceCount ?? 0,
     };
 
     this.entries.set(entry.id, entry);
@@ -515,9 +535,67 @@ export class CoreMemoryManager {
   }
 }
 
-/**
- * Create a core memory manager
- */
+function encodeMemoryMarker(entry: CoreMemoryEntry): string {
+  const parts = [
+    `id=${entry.id}`,
+    `created=${entry.createdAt}`,
+    `updated=${entry.updatedAt}`,
+    `source=${entry.source}`,
+    `refs=${entry.referenceCount}`,
+  ];
+  if (entry.workspaceId) {
+    parts.push(`workspace=${entry.workspaceId}`);
+  }
+  if (entry.lastReferenced) {
+    parts.push(`last=${entry.lastReferenced}`);
+  }
+  return `<!--squire-memory ${parts.join(' ')}-->`;
+}
+
+function parseMemoryMarker(content: string): {
+  content: string;
+  id?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  source?: MemorySource;
+  workspaceId?: string;
+  lastReferenced?: string;
+  referenceCount?: number;
+} {
+  const fullMatch = content.match(/<!--squire-memory\s+([^>]+)-->/);
+  if (fullMatch) {
+    const fields = Object.fromEntries(
+      fullMatch[1]
+        .trim()
+        .split(/\s+/)
+        .map((part) => {
+          const eq = part.indexOf('=');
+          return eq === -1 ? [part, ''] : [part.slice(0, eq), part.slice(eq + 1)];
+        })
+    );
+    return {
+      content: content.replace(fullMatch[0], '').trim(),
+      id: fields.id,
+      createdAt: fields.created,
+      updatedAt: fields.updated,
+      source: fields.source as MemorySource | undefined,
+      workspaceId: fields.workspace,
+      lastReferenced: fields.last,
+      referenceCount: fields.refs ? Number(fields.refs) : undefined,
+    };
+  }
+
+  const idMatch = content.match(/<!--squire-memory-id:([0-9a-fA-F-]{36})-->/);
+  if (idMatch) {
+    return {
+      content: content.replace(idMatch[0], '').trim(),
+      id: idMatch[1],
+    };
+  }
+
+  return { content };
+}
+
 export function createCoreMemoryManager(options: CoreMemoryOptions): CoreMemoryManager {
   return new CoreMemoryManager(options);
 }

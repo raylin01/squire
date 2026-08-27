@@ -27,7 +27,7 @@ export function getPluginLoader(): PluginLoader | null {
   return _pluginLoader;
 }
 
-export { PluginLoader, createPluginLoader, type PluginLoaderOptions } from './loader.js';
+export { PluginLoader, createPluginLoader, shouldEnablePlugin, type PluginLoaderOptions, type PluginEnablePolicy } from './loader.js';
 export type {
   SquirePlugin,
   PluginContext,

@@ -12,6 +12,11 @@ import {
   Client,
 } from 'discord.js';
 import type { Squire } from '../../index.js';
+import {
+  ACCESS_DENIED_MESSAGE,
+  evaluateDiscordAccess,
+} from '../access-control.js';
+import type { SquireBotConfig } from '../config.js';
 
 // Command definitions
 const commands = [
@@ -450,9 +455,23 @@ async function handleInterrupt(
 /**
  * Set up slash command handler on the client
  */
-export function setupSlashCommandHandler(client: Client, squire: Squire): void {
+export function setupSlashCommandHandler(
+  client: Client,
+  squire: Squire,
+  config: SquireBotConfig
+): void {
   client.on('interactionCreate', async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
+
+    const access = evaluateDiscordAccess(config, {
+      userId: interaction.user.id,
+      guildId: interaction.guildId,
+    });
+    if (!access.allowed) {
+      console.warn(`[Access] Denied slash command from ${interaction.user.id}: ${access.reason}`);
+      await interaction.reply({ content: ACCESS_DENIED_MESSAGE, ephemeral: true });
+      return;
+    }
 
     await handleSlashCommand(interaction, squire);
   });
