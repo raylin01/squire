@@ -239,6 +239,28 @@ export class TaskStorage {
   }
 
   /**
+   * Atomically claim due pending tasks so overlapping polls cannot run the same row twice.
+   */
+  claimDueTasks(now: Date = new Date()): ScheduledTask[] {
+    return this.db.transaction(() => {
+      const due = this.getDueTasks(now);
+      const claimed: ScheduledTask[] = [];
+      const claim = this.db.prepare(`
+        UPDATE scheduled_tasks
+        SET status = 'running'
+        WHERE task_id = ? AND status = 'pending'
+      `);
+      for (const task of due) {
+        const result = claim.run(task.taskId);
+        if (result.changes === 1) {
+          claimed.push({ ...task, status: 'running' });
+        }
+      }
+      return claimed;
+    })();
+  }
+
+  /**
    * Update task status
    */
   updateStatus(taskId: string, status: TaskStatus, reason?: string): void {

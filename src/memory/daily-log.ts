@@ -52,6 +52,7 @@ export class DailyLogManager {
   private memoryDir: string;
   private dailyDir: string;
   private cache: Map<string, DailyLog> = new Map();
+  private mutationChain: Promise<unknown> = Promise.resolve();
 
   constructor(options: DailyLogOptions) {
     this.memoryDir = options.memoryDir;
@@ -92,41 +93,34 @@ export class DailyLogManager {
       date?: string;  // Override date (defaults to today)
     }
   ): Promise<DailyLogEntry> {
-    const date = options?.date || this.getToday();
-    const entry: DailyLogEntry = {
-      id: uuid(),
-      type,
-      timestamp: new Date().toISOString(),
-      content,
-      workspaceId: options?.workspaceId,
-      metadata: options?.metadata,
-    };
+    return this.mutate(async () => {
+      const date = options?.date || this.getToday();
+      const entry: DailyLogEntry = {
+        id: uuid(),
+        type,
+        timestamp: new Date().toISOString(),
+        content,
+        workspaceId: options?.workspaceId,
+        metadata: options?.metadata,
+      };
 
-    // Load or create the daily log
-    const log = await this.loadLog(date);
+      const log = await this.loadLog(date);
+      log.entries.push(entry);
 
-    // Add entry
-    log.entries.push(entry);
+      if (options?.workspaceId && !log.workspaces.includes(options.workspaceId)) {
+        log.workspaces.push(options.workspaceId);
+      }
 
-    // Update workspace list
-    if (options?.workspaceId && !log.workspaces.includes(options.workspaceId)) {
-      log.workspaces.push(options.workspaceId);
-    }
+      if (type === 'commit') {
+        log.commits++;
+      } else if (type === 'task' && options?.metadata?.taskStatus === 'completed') {
+        log.tasksCompleted++;
+      }
 
-    // Update counters
-    if (type === 'commit') {
-      log.commits++;
-    } else if (type === 'task' && options?.metadata?.taskStatus === 'completed') {
-      log.tasksCompleted++;
-    }
-
-    // Save the log
-    await this.saveLog(log);
-
-    // Invalidate cache
-    this.cache.delete(date);
-
-    return entry;
+      await this.saveLog(log);
+      this.cache.set(date, log);
+      return entry;
+    });
   }
 
   /**
@@ -602,6 +596,12 @@ export class DailyLogManager {
     return files
       .filter(f => f.endsWith('.md') && DATE_REGEX.test(f.replace('.md', '')))
       .map(f => path.join(this.dailyDir, f));
+  }
+
+  private async mutate<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.mutationChain.then(fn, fn);
+    this.mutationChain = run.then(() => undefined, () => undefined);
+    return run;
   }
 }
 

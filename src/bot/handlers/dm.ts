@@ -14,6 +14,11 @@ import type { Client } from 'discord.js';
 import type { Squire } from '../../index.js';
 import { registerQuestionChannel } from './questions.js';
 import { handleCommand } from './commands.js';
+import {
+  ACCESS_DENIED_MESSAGE,
+  evaluateDiscordAccess,
+} from '../access-control.js';
+import type { SquireBotConfig } from '../config.js';
 
 interface WorkspaceManager {
   getOrCreateWorkspace(channelId: string, channelName: string, source: 'discord_dm' | 'discord_channel' | 'discord_forum'): Promise<string>;
@@ -45,7 +50,8 @@ export function setupDmHandler(
   client: Client,
   squire: Squire,
   workspaceManager: WorkspaceManager,
-  communicator: DiscordCommunicator
+  communicator: DiscordCommunicator,
+  config: SquireBotConfig
 ): void {
   client.on(Events.MessageCreate, async (message: Message) => {
     // Ignore bot messages
@@ -53,6 +59,18 @@ export function setupDmHandler(
 
     // Only handle DMs
     if (message.channel.type !== ChannelType.DM) return;
+
+    const access = evaluateDiscordAccess(config, {
+      userId: message.author.id,
+      guildId: message.guildId,
+    });
+    if (!access.allowed) {
+      console.warn(`[Access] Denied DM from ${message.author.id}: ${access.reason}`);
+      if (message.channel.isTextBased() && 'send' in message.channel) {
+        await message.reply(ACCESS_DENIED_MESSAGE).catch(() => undefined);
+      }
+      return;
+    }
 
     const content = message.content.trim();
     const attachments = message.attachments;

@@ -21,12 +21,8 @@ import { matchesLearnedPattern } from './learned-patterns.js';
  * These patterns are checked first - if matched, no approval needed.
  */
 const SAFE_PATTERNS: Array<RegExp> = [
-  // Python execution (inline scripts)
-  /^python3?\s+-c\s+/,
-  /^python3?\s+-m\s+/,
-  /^python3?\s+[\w\/.-]+\.py$/,
-
-  // Package managers (install only, not remove)
+  // Package managers (install / inspect only; postinstall scripts still exist,
+  // but these are not prefix-matches of arbitrary chained commands)
   /^npm\s+(install|i|add|update|run|test|build|dev)$/,
   /^npm\s+install\s+/,
   /^npm\s+run\s+/,
@@ -35,7 +31,7 @@ const SAFE_PATTERNS: Array<RegExp> = [
   /^pip3?\s+install/,
   /^pip3?\s+show/,
   /^pip3?\s+list/,
-  /^bun\s+(install|add|run|test|build|dev)/,
+  /^bun\s+(install|add|run|test|build|dev)\b/,
 
   // File reading/viewing
   /^cat\s+/,
@@ -51,7 +47,7 @@ const SAFE_PATTERNS: Array<RegExp> = [
   /^rg\s+/,
   /^ag\s+/,
 
-  // Git safe operations
+  // Git read / fetch operations (not push, reset, or clean)
   /^git\s+status/,
   /^git\s+log/,
   /^git\s+diff/,
@@ -59,21 +55,10 @@ const SAFE_PATTERNS: Array<RegExp> = [
   /^git\s+branch/,
   /^git\s+remote/,
   /^git\s+fetch/,
-  /^git\s+pull(?!\s+--rebase)/,
-  /^git\s+clone/,
 
-  // Node/bun execution
-  /^node\s+/,
-  /^bun\s+/,
-  /^npx\s+/,
-  /^tsx\s+/,
-  /^ts-node\s+/,
-
-  // Development tools
-  /^make\s+/,
-  /^cargo\s+(build|run|test|check|clippy)/,
-  /^go\s+(build|run|test|fmt|vet)/,
-  /^rustc\s+/,
+  // Development inspect
+  /^cargo\s+(test|check|clippy)\b/,
+  /^go\s+(test|fmt|vet)\b/,
 
   // System info
   /^which\s+/,
@@ -87,19 +72,6 @@ const SAFE_PATTERNS: Array<RegExp> = [
   /^sw_vers/,
   /^date\b/,
   /^uptime/,
-
-  // Safe curl (info only)
-  /^curl\s+-I\s+/,
-  /^curl\s+-s\s+/,
-  /^curl\s+-L\s+/,
-
-  // Misc safe commands
-  /^mkdir\s+/,
-  /^touch\s+/,
-  /^cp\s+/,
-  /^mv\s+/,
-  /^chmod\s+/,
-  /^ln\s+-s/,
 ];
 
 // ============================================================================
@@ -126,6 +98,10 @@ const ALWAYS_DANGEROUS_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   { pattern: /\bmkfs\b/, reason: 'Filesystem creation' },
   { pattern: /\bfdisk\b/, reason: 'Disk partitioning' },
 
+  // Destructive file ops (not autoSafe)
+  { pattern: /\brm(\s|$)/, reason: 'File deletion' },
+  { pattern: /\brmdir\s/, reason: 'Directory deletion' },
+
   // Fork bomb
   { pattern: /:\(\)\s*\{\s*:\|:&\s*\};\s*:/, reason: 'Fork bomb' },
 
@@ -139,10 +115,6 @@ const ALWAYS_DANGEROUS_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
  * These can modify files/system but are generally recoverable.
  */
 const STRICT_ONLY_DANGEROUS_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
-  // File deletion
-  { pattern: /\brm\s/, reason: 'File deletion' },
-  { pattern: /\brmdir\s/, reason: 'Directory deletion' },
-
   // Git dangerous
   { pattern: /\bgit\s+push\s+.*--force\b/, reason: 'Force push' },
   { pattern: /\bgit\s+reset\s+--hard\b/, reason: 'Hard reset' },
@@ -167,9 +139,70 @@ const STRICT_ONLY_DANGEROUS_PATTERNS: Array<{ pattern: RegExp; reason: string }>
 
 export type PermissionMode = 'strict' | 'autoSafe' | 'permissive';
 
-// ============================================================================
-// Permission Checking Functions
-// ============================================================================
+/**
+ * True when a command uses shell chaining, piping, substitution, or redirection.
+ * SAFE_PATTERNS are prefix regexes; without this guard, `ls; rm -rf /` matches `^ls\b`.
+ */
+const SHELL_CONTROL_SYNTAX = /(?:\n|;|\|\||&&|\||`|\$\(|\$\{|[<>]|(?:^|[^&])&(?:[^&]|$))/;
+
+export function hasShellControlSyntax(command: string): boolean {
+  return SHELL_CONTROL_SYNTAX.test(command);
+}
+
+/**
+ * Native Squire/MCP tools that must never be auto-approved in autoSafe.
+ * Prefix-matching every `squire_*` / `mcp__squire__*` would auto-approve
+ * plugin writes that the bot later import()s, restarts, and config mutation.
+ */
+const NATIVE_TOOLS_REQUIRING_APPROVAL = new Set([
+  'plugin_create',
+  'plugin_update',
+  'squire_restart',
+  'squire_update_config',
+  'squire_set_permission_mode',
+  'squire_switch_sdk',
+  'squire_switch_model',
+]);
+
+export function nativeToolBaseName(toolName: string): string {
+  const normalized = toolName.trim().toLowerCase();
+  if (normalized.startsWith('mcp__squire__')) {
+    return normalized.slice('mcp__squire__'.length);
+  }
+  return normalized;
+}
+
+function bashApprovalReason(command: string, mode: PermissionMode): string | null {
+  for (const { pattern, reason } of ALWAYS_DANGEROUS_PATTERNS) {
+    if (pattern.test(command)) {
+      return reason;
+    }
+  }
+
+  if (hasShellControlSyntax(command)) {
+    return 'Shell chaining, piping, or redirection';
+  }
+
+  if (mode === 'strict') {
+    for (const { pattern, reason } of STRICT_ONLY_DANGEROUS_PATTERNS) {
+      if (pattern.test(command)) {
+        return reason;
+      }
+    }
+  }
+
+  for (const pattern of SAFE_PATTERNS) {
+    if (pattern.test(command)) {
+      return null;
+    }
+  }
+
+  if (matchesLearnedPattern(command)) {
+    return null;
+  }
+
+  return 'Command not in safe list';
+}
 
 /**
  * Check if a bash command requires approval.
@@ -179,41 +212,11 @@ export function checkBashPermission(
   command: string,
   mode: PermissionMode
 ): string | null {
-  // Permissive mode - approve everything
   if (mode === 'permissive') {
     return null;
   }
 
-  // Check always dangerous patterns FIRST (take precedence over safe patterns)
-  for (const { pattern, reason } of ALWAYS_DANGEROUS_PATTERNS) {
-    if (pattern.test(command)) {
-      return reason;
-    }
-  }
-
-  // In strict mode, also check strict-only dangerous patterns
-  if (mode === 'strict') {
-    for (const { pattern, reason } of STRICT_ONLY_DANGEROUS_PATTERNS) {
-      if (pattern.test(command)) {
-        return reason;
-      }
-    }
-  }
-
-  // Check safe patterns - auto-approve if matched
-  for (const pattern of SAFE_PATTERNS) {
-    if (pattern.test(command)) {
-      return null;  // Auto-approve safe commands
-    }
-  }
-
-  // Check learned patterns - auto-approve if user has approved before
-  if (matchesLearnedPattern(command)) {
-    return null;  // Auto-approve learned commands
-  }
-
-  // Default: require approval for unknown commands (secure by default)
-  return 'Command not in safe list';
+  return bashApprovalReason(command, mode);
 }
 
 /**
@@ -222,41 +225,18 @@ export function checkBashPermission(
  */
 export function checkToolPermission(
   toolName: string,
-  _input: Record<string, unknown>,
+  input: Record<string, unknown> | undefined,
   mode: PermissionMode
 ): string | null {
-  // Permissive mode - approve everything
-  if (mode === 'permissive') {
+  if (shouldAutoApproveTool(toolName, input, mode)) {
     return null;
   }
 
-  // Tools that ALWAYS require approval (even in autoSafe)
-  const alwaysRequireApproval = new Set([
-    'shutdown',
-    'reboot',
-    'system_control',
-  ]);
-
-  if (alwaysRequireApproval.has(toolName)) {
-    return `${toolName} requires approval`;
+  if (toolName === 'Bash') {
+    return checkBashPermission(String(input?.command ?? ''), mode);
   }
 
-  // In strict mode, file modifications require approval
-  if (mode === 'strict') {
-    const strictRequireApproval = new Set([
-      'Edit',
-      'Write',
-      'Bash',
-      'Task',
-    ]);
-
-    if (strictRequireApproval.has(toolName)) {
-      return `${toolName} requires approval in strict mode`;
-    }
-  }
-
-  // Auto-approve
-  return null;
+  return `${toolName} requires approval`;
 }
 
 /**
@@ -338,7 +318,7 @@ export function shouldAutoApproveInSafeMode(
   input: Record<string, unknown> | undefined
 ): boolean {
   if (isSquireNativeTool(toolName)) {
-    return true;
+    return shouldAutoApproveNativeTool(toolName, input);
   }
 
   // AskUserQuestion should NEVER be auto-approved - it requires actual user input
@@ -354,37 +334,56 @@ export function shouldAutoApproveInSafeMode(
   // For Bash, check the command against our patterns
   if (toolName === 'Bash') {
     const command = (input?.command as string) || '';
-
-    // First check for dangerous patterns - these take precedence
-    for (const { pattern } of ALWAYS_DANGEROUS_PATTERNS) {
-      if (pattern.test(command)) {
-        return false;
-      }
-    }
-    for (const { pattern } of STRICT_ONLY_DANGEROUS_PATTERNS) {
-      if (pattern.test(command)) {
-        return false;
-      }
-    }
-
-    // Check for safe patterns
-    for (const pattern of SAFE_PATTERNS) {
-      if (pattern.test(command)) {
-        return true;
-      }
-    }
-
-    // Check learned patterns - auto-approve if user has approved before
-    if (matchesLearnedPattern(command)) {
-      return true;
-    }
-
-    // Default to requiring approval for unknown Bash commands
-    return false;
+    return bashApprovalReason(command, 'autoSafe') === null;
   }
 
   // All other tools require approval
   return false;
+}
+
+/**
+ * Single approval decision used by the Claude SDK and checkToolPermission.
+ * Native Squire tools are not a blanket auto-approve in any mode.
+ */
+export function shouldAutoApproveTool(
+  toolName: string,
+  input: Record<string, unknown> | undefined,
+  mode: PermissionMode
+): boolean {
+  if (mode === 'permissive') {
+    return true;
+  }
+
+  if (mode === 'strict') {
+    if (SAFE_TOOLS.has(toolName)) {
+      return true;
+    }
+    if (isSquireNativeTool(toolName)) {
+      return shouldAutoApproveNativeTool(toolName, input);
+    }
+    return false;
+  }
+
+  return shouldAutoApproveInSafeMode(toolName, input);
+}
+
+function shouldAutoApproveNativeTool(
+  toolName: string,
+  input: Record<string, unknown> | undefined
+): boolean {
+  const base = nativeToolBaseName(toolName);
+  if (NATIVE_TOOLS_REQUIRING_APPROVAL.has(base)) {
+    return false;
+  }
+
+  if (base === 'squire_communicate') {
+    const type = input?.type;
+    if (type === 'file' || Boolean(input?.filePath)) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 /**

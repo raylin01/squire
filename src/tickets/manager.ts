@@ -88,6 +88,7 @@ export interface UpdateTicketOptions {
   priority?: TicketPriority;
   assignee?: TicketAssignee;
   assigneeUserId?: string;
+  forumPostId?: string;
   title?: string;
   description?: string;
   aiContext?: TicketAiContext;
@@ -196,6 +197,10 @@ export class TicketManager {
     if (options.description !== undefined) {
       updates.push('description = ?');
       values.push(options.description);
+    }
+    if (options.forumPostId !== undefined) {
+      updates.push('forum_post_id = ?');
+      values.push(options.forumPostId);
     }
     if (options.aiContext !== undefined) {
       updates.push('ai_context = ?');

@@ -6,6 +6,8 @@
  */
 
 import { EventEmitter } from "events";
+import fs from "fs";
+import path from "path";
 import {
     SDKConfig,
     SDKMessage,
@@ -331,6 +333,28 @@ export abstract class BaseSDKClient extends EventEmitter<SDKClientEventMap> {
         images: Array<{ data: string; mediaType: string }>,
     ): Promise<void> {
         return this.sendMessage({ role: "user", content: text, images });
+    }
+
+    /**
+     * Providers that only accept text get image bytes written to cwd so the CLI can Read them.
+     */
+    protected materializeMessageForTextCli(message: SDKMessage): string {
+        if (!message.images || message.images.length === 0) {
+            return message.content;
+        }
+
+        const cwd = this.config.cwd || process.cwd();
+        const dir = path.join(cwd, ".squire", "uploads");
+        fs.mkdirSync(dir, { recursive: true });
+
+        const lines = [message.content, "", "The user attached image files. Read these files:"];
+        message.images.forEach((image, index) => {
+            const subtype = (image.mediaType.split("/")[1] || "png").replace(/[^a-z0-9]/gi, "") || "png";
+            const filePath = path.join(dir, `attachment-${Date.now()}-${index}.${subtype}`);
+            fs.writeFileSync(filePath, Buffer.from(image.data, "base64"));
+            lines.push(`- ${filePath} (${image.mediaType})`);
+        });
+        return lines.join("\n");
     }
 
     // Public API

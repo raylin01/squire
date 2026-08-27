@@ -98,4 +98,5 @@ export interface PluginInfo {
   state: PluginState;
   error?: string;
   loadedAt?: Date;
+  detachListeners?: () => void;
 }

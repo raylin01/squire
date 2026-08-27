@@ -1,6 +1,18 @@
 # Architecture Decision: Squire Architecture
 
-## Executive Summary
+## Shipped architecture (current)
+
+Squire ships as an **in-process Discord bot** plus Squire core in this repository.
+
+- `src/bot.ts` owns the Discord client and constructs `Squire` in the same process.
+- There is no runner-agent WebSocket hop and no separate thin SquireBot server.
+- Memory is Markdown under `~/.squire` (core `MEMORY.md` + daily logs), not a SQLite `memory.db` backend.
+- Discord settings live in `~/.squirebot/config.json`. Overlapping identity and SDK settings are synced there when core config is saved.
+- CLI `squire start` launches this package's `dist/bot.js`.
+
+The dual-connection runner-agent design below is a **historical proposal**. It does not describe the running product.
+
+## Executive Summary (historical proposal)
 
 **Recommendation: Dual-Connection Architecture**
 
@@ -10,7 +22,7 @@ Runner-agent with the Squire plugin connects to **BOTH** DisCode bot AND SquireB
 
 SquireBot is a **minimal Discord bot** that acts as a thin interface, with the "brains" in runner-agent's squire plugin.
 
-## Current Architecture (Dual-Connection)
+## Historical architecture (dual-connection proposal)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐

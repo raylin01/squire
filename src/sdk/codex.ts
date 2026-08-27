@@ -144,7 +144,7 @@ export class CodexSDKClient extends BaseSDKClient {
     this.setStatus('working');
 
     try {
-      const turn = this.client.send(message.content, {
+      const turn = this.client.send(this.materializeMessageForTextCli(message), {
         approvalPolicy: this.getApprovalPolicy(),
         model: this.config.model || null,
       });

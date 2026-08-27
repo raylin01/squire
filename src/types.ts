@@ -492,6 +492,7 @@ export type SquireEventType =
   | 'communication'
   | 'approval_required'
   | 'approval_auto'
+  | 'config_updated'
   | 'run_interrupted'
   | 'status';
 

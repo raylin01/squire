@@ -32,6 +32,29 @@ export interface PluginLoaderOptions {
   registerChannel?: (workspaceId: string, channel: TextChannel | DMChannel | ThreadChannel) => void;
 }
 
+export interface PluginEnablePolicy {
+  disabled?: string[];
+  enabled?: string[];
+  autoEnable?: boolean;
+}
+
+export function shouldEnablePlugin(name: string, policy: PluginEnablePolicy): { load: boolean; reason?: string } {
+  const disabled = policy.disabled ?? [];
+  const enabled = policy.enabled ?? [];
+  const autoEnable = policy.autoEnable ?? true;
+
+  if (disabled.includes(name)) {
+    return { load: false, reason: 'Disabled in config' };
+  }
+  if (enabled.length > 0 && !enabled.includes(name)) {
+    return { load: false, reason: 'Not in enabled list' };
+  }
+  if (!autoEnable && !enabled.includes(name)) {
+    return { load: false, reason: 'autoEnable is false' };
+  }
+  return { load: true };
+}
+
 export class PluginLoader {
   private pluginsDir: string;
   private client: Client;
@@ -197,6 +220,23 @@ export class PluginLoader {
     }
 
     try {
+      const decision = shouldEnablePlugin(name, {
+        disabled: this.config.plugins?.disabled,
+        enabled: this.config.plugins?.enabled,
+        autoEnable: this.autoEnable,
+      });
+      if (!decision.load) {
+        const info: PluginInfo = {
+          plugin: { name, version: '0.0.0' },
+          path: path.join(this.pluginsDir, name),
+          state: 'disabled',
+          error: decision.reason,
+        };
+        this.plugins.set(name, info);
+        console.log(`[Plugins] Skipped ${name}: ${decision.reason}`);
+        return info;
+      }
+
       const info = await this.loadPluginInfo(name);
       info.state = 'loading';
 
@@ -220,8 +260,9 @@ export class PluginLoader {
         }
       }
 
-      // Create context
-      const context = this.createContext(name, info.path);
+      const { wrapped, detach } = wrapClientListeners(this.client);
+      info.detachListeners = detach;
+      const context = this.createContext(name, info.path, wrapped);
 
       // Call onLoad
       if (info.plugin.onLoad) {
@@ -230,7 +271,7 @@ export class PluginLoader {
 
       // Call setup with Discord client
       if (info.plugin.setup) {
-        await info.plugin.setup(this.client, context);
+        await info.plugin.setup(wrapped, context);
       }
 
       info.state = 'loaded';
@@ -263,10 +304,11 @@ export class PluginLoader {
     }
 
     try {
-      // Call onUnload
       if (info.plugin.onUnload) {
         await info.plugin.onUnload();
       }
+      info.detachListeners?.();
+      info.detachListeners = undefined;
 
       info.state = 'disabled';
       console.log(`[Plugins] Unloaded: ${name}`);
@@ -410,13 +452,13 @@ export class PluginLoader {
   /**
    * Create plugin context
    */
-  private createContext(name: string, pluginDir: string): PluginContext {
+  private createContext(name: string, pluginDir: string, client: Client = this.client): PluginContext {
     const self = this;
 
     return {
       pluginDir,
       pluginName: name,
-      client: this.client,
+      client,
       // Provide require that resolves from bot's node_modules
       require: botRequire,
       squireId: this.squireId,
@@ -484,6 +526,32 @@ export class PluginLoader {
       },
     };
   }
+}
+
+function wrapClientListeners(client: Client): { wrapped: Client; detach: () => void } {
+  const tracked: Array<{ event: string | symbol; listener: (...args: any[]) => void }> = [];
+  const wrapped = new Proxy(client, {
+    get(target, prop, receiver) {
+      if (prop === 'on' || prop === 'once' || prop === 'addListener') {
+        return (event: string | symbol, listener: (...args: any[]) => void) => {
+          tracked.push({ event, listener });
+          return (target as any)[prop](event, listener);
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  }) as Client;
+
+  return {
+    wrapped,
+    detach: () => {
+      for (const { event, listener } of tracked) {
+        client.off(event, listener);
+      }
+      tracked.length = 0;
+    },
+  };
 }
 
 /**

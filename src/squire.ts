@@ -31,7 +31,7 @@ import type {
   ScheduleTaskOptions,
   SDKProvider,
 } from './types.js';
-import { resolveConfig, ensureSquireDir } from './config.js';
+import { resolveConfig, ensureSquireDir, saveConfig, deepMergeObjects } from './config.js';
 import { calculateNextRun } from './scheduler/parser.js';
 import { HybridMemoryManager, createHybridMemoryManager } from './memory/index.js';
 import type { MemoryAddOptions, CoreMemoryType } from './memory/types.js';
@@ -39,7 +39,7 @@ import { SkillManager, createSkillManager } from './skills/index.js';
 import { Scheduler, createScheduler } from './scheduler/index.js';
 import { TicketManager, createTicketManager } from './tickets/index.js';
 import { PersonalityManager, createPersonalityManager } from './personality/index.js';
-import { toolRegistry, setCommunicationHandler, communicate, setSelfManageState, setMemoryManager as setToolMemoryManager, setScheduler as setToolScheduler, setSchedulerWorkspaceAccessors, setTicketManager as setToolTicketManager, setSquireInstance, setExecutionContext, clearExecutionContext, getExecutionContext } from './tools/index.js';
+import { toolRegistry, setCommunicationHandler, communicate, setSelfManageState, setMemoryManager as setToolMemoryManager, setScheduler as setToolScheduler, setSchedulerWorkspaceAccessors, setTicketManager as setToolTicketManager, setSquireInstance, runWithExecutionContext, getExecutionContext } from './tools/index.js';
 import { createToolLoader } from './tools/loader.js';
 import { checkBashPermission, checkToolPermission } from './permissions/index.js';
 import { addLearnedPattern } from './permissions/learned-patterns.js';
@@ -139,7 +139,28 @@ export class Squire extends EventEmitter {
         await this.switchModel(model);
       },
       updateConfig: async (updates: Record<string, unknown>) => {
-        this.config = { ...this.config, ...updates } as SquireConfig;
+        const previousProvider = this.config.sdk.provider;
+        const previousModel = this.getConfiguredModel();
+        const previousMode = this.config.permissions.mode;
+
+        this.config = deepMergeObjects(this.config, updates) as SquireConfig;
+        saveConfig(this.config);
+        this.emitEvent('config_updated', { config: this.config });
+
+        const nextProvider = this.config.sdk.provider;
+        const nextModel = this.getConfiguredModel();
+        const nextMode = this.config.permissions.mode;
+        if (nextProvider !== previousProvider || nextModel !== previousModel || nextMode !== previousMode) {
+          const details: WorkspaceSwitchDetails = {
+            reason: nextProvider !== previousProvider ? 'provider' : 'model',
+            switchedAt: new Date().toISOString(),
+            fromProvider: previousProvider,
+            toProvider: nextProvider,
+            fromModel: previousModel || null,
+            toModel: nextModel || null,
+          };
+          await this.rebuildWorkspaceSessions(details);
+        }
       },
       reloadSkills: async () => {
         if (this.skillManager) {
@@ -259,6 +280,10 @@ export class Squire extends EventEmitter {
     setSquireInstance({
       getConfig: () => this.config,
       getPersonalityManager: () => this.personalityManager,
+      remember: (content: string, category?: string) => this.remember(content, {
+        type: category === 'preferences' ? 'preference' : 'fact',
+        source: 'squire',
+      }),
     });
 
     this.running = true;
@@ -339,13 +364,12 @@ export class Squire extends EventEmitter {
 
         try {
           console.log(`[Squire][ToolBridge] Executing ${toolName} (workspace: ${workspaceId || 'none'})`);
-          setExecutionContext({ workspaceId });
-          const result = await Promise.race([
+          const result = await runWithExecutionContext({ workspaceId }, () => Promise.race([
             toolRegistry.execute(toolName, input),
             new Promise<string>((_, reject) => {
               setTimeout(() => reject(new Error(`Tool execution timeout: ${toolName}`)), 30_000);
             }),
-          ]);
+          ]));
           res.statusCode = 200;
           res.setHeader('content-type', 'application/json');
           res.end(JSON.stringify({ ok: true, result }));
@@ -356,8 +380,6 @@ export class Squire extends EventEmitter {
           res.setHeader('content-type', 'application/json');
           res.end(JSON.stringify({ ok: false, error: message }));
           console.error(`[Squire][ToolBridge] Failed ${toolName}: ${message}`);
-        } finally {
-          clearExecutionContext();
         }
       });
     });
@@ -1225,8 +1247,9 @@ export class Squire extends EventEmitter {
     // Check if this is a built-in Squire tool
     if (toolRegistry.has(event.toolName)) {
       try {
-        setExecutionContext({ workspaceId: event.workspaceId });
-        const result = await toolRegistry.execute(event.toolName, event.input);
+        const result = await runWithExecutionContext({ workspaceId: event.workspaceId }, () =>
+          toolRegistry.execute(event.toolName, event.input)
+        );
         await session.sendToolResult({
           toolUseId: event.toolId,
           content: result,
@@ -1237,8 +1260,6 @@ export class Squire extends EventEmitter {
           content: `Error: ${error instanceof Error ? error.message : String(error)}`,
           isError: true,
         });
-      } finally {
-        clearExecutionContext();
       }
     }
     // For bash commands, check permissions
@@ -1387,6 +1408,13 @@ export class Squire extends EventEmitter {
     }
 
     const interrupted = await session.interrupt();
+
+    workspace.context = {
+      ...workspace.context,
+      cliSessionId: undefined,
+    };
+    session.updateWorkspace(workspace);
+    await this.saveWorkspaces();
 
     for (const [requestId, pending] of this.pendingApprovals.entries()) {
       if (pending.workspaceId === workspaceId) {
@@ -1610,7 +1638,7 @@ export class Squire extends EventEmitter {
 
       const systemPrompt = contextLines.join('\n');
 
-      // Use the existing sendMessage infrastructure which handles context and session management
+      // sendMessage waits for the SDK turn to finish (Claude/Gemini/Codex await turn.done).
       await this.sendMessage(task.workspaceId, systemPrompt);
 
       return {

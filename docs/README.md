@@ -1,47 +1,25 @@
 # Squire - Personal AI Assistant
 
-A personal AI assistant system that can work independently in the background, remember context across sessions, and be accessed via Discord.
+A personal AI assistant that remembers context across sessions and is accessed via Discord.
 
-**Architecture Decision:** See [ARCHITECTURE-DECISION.md](./ARCHITECTURE-DECISION.md) for the recommendation on standalone SquireBot vs DisCode integration.
+**Architecture:** See [ARCHITECTURE-DECISION.md](./ARCHITECTURE-DECISION.md). The shipped product is an in-process Discord bot (`src/bot.ts`) that owns Squire core. There is no runner-agent WebSocket hop.
 
 ## Overview
 
-Squire uses a **dual-connection architecture** where runner-agent connects to both DisCode bot and SquireBot:
-
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         RUNNER-AGENT                             │
-│                                                                  │
-│  Core Plugins: claude-sdk, codex-sdk, gemini-sdk, tmux          │
-│                                                                  │
-│  Squire Plugin:                                                  │
-│  - Memory system (SQLite)                                        │
-│  - Ticket tools                                                  │
-│  - Channel management tools                                      │
-│  - Scheduler                                                     │
-│  - Skills system                                                 │
-│                                                                  │
-│  Dual Connection (simultaneous):                                 │
-│  - WebSocket to DisCode Bot → Sessions, projects                │
-│  - WebSocket to SquireBot → DMs, forums, channel management     │
-└─────────────────────────────────────────────────────────────────┘
-         │                                    │
-         ▼                                    ▼
-┌─────────────────┐                  ┌─────────────────────────────────┐
-│  DISCODE BOT    │                  │  SQUIRE BOT (minimal)           │
-│  (unchanged)    │                  │                                 │
-│                 │                  │  - WebSocket server             │
-│  - Sessions     │                  │  - DM passthrough               │
-│  - Projects     │                  │  - Forum passthrough            │
-│  - Multi-user   │                  │  - Channel API for AI skills    │
-└─────────────────┘                  └─────────────────────────────────┘
+Discord
+   │
+   ▼
+SquireBot process (src/bot.ts)
+   ├── discord.js client (DMs, guilds, forums, slash commands)
+   └── Squire core in-process
+         ├── SDK sessions (Claude / Gemini / Codex)
+         ├── Markdown memory (~/.squire)
+         ├── Scheduler (SQLite)
+         └── Skills / tools / tickets
 ```
 
-**Key points:**
-- **SquireBot is minimal** - just Discord interface + WebSocket server
-- **discord-bot is unchanged** - no squire code added
-- **runner-agent does the work** - squire plugin provides all AI capabilities
-- **Channel management as skills** - AI can create channels, post updates, etc.
+Discord login and allowlists live in `~/.squirebot/config.json`. Core identity, SDK provider, and permission mode are kept in `~/.squire/config.json` and synced into the bot config when saved.
 
 ## Key Features
 
